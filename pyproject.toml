@@ -1,0 +1,85 @@
+[project]
+name = "tesseract-torch"
+description = "Tesseract Torch wraps Tesseracts as differentiable PyTorch operations, with full support for reverse-mode and forward-mode automatic differentiation."
+readme = "README.md"
+authors = [
+    {name = "The tesseract-torch team @ Pasteur Labs", email = "info@simulation.science"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "tesseract-core",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/pasteurlabs/tesseract-torch"
+
+[project.optional-dependencies]
+docs = [
+    "sphinx",
+    "sphinx_autodoc_typehints",
+    "furo",
+    "myst-nb",
+    "sphinx_copybutton",
+    "sphinx_design",
+    "sphinxext_opengraph",
+    "tesseract-core[runtime]",
+]
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-benchmark",
+    "pytest-cov",
+    "typeguard",
+    "requests",
+    "tesseract-core[runtime]",
+    "tesseract-torch[docs]",
+]
+
+[build-system]
+requires = ["setuptools", "versioneer[toml]==0.29"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tesseract_torch", "tesseract_torch.*"]
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "tesseract_torch/_version.py"
+versionfile_build = "tesseract_torch/_version.py"
+tag_prefix = "v"
+parentdir_prefix = "tesseract_torch-"
+
+[tool.pytest.ini_options]
+addopts = ["--typeguard-packages=tesseract_torch"]
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    # ignored by default
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::ImportWarning",
+    # raised by Cython, usually harmless
+    "ignore:numpy.dtype size changed",
+    "ignore:numpy.ufunc size changed",
+    # sometimes, dependencies leak resources
+    "ignore:.*socket\\.socket.*:pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["tesseract_torch"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+]
+ignore_errors = true
+omit = [
+    "tesseract_torch/_version.py",
+]

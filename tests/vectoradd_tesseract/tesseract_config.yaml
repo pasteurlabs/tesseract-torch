@@ -1,0 +1,7 @@
+name: vectoradd_tesseract
+version: "2025-11-05"
+description: |
+  Tesseract that adds two vectors. Pure numpy.
+
+build_config:
+  target_platform: "native"

@@ -1,0 +1,7 @@
+name: vectoradd_torch
+version: "0.1.0"
+description: |
+  Tesseract that adds/subtracts two vectors. Uses PyTorch internally.
+
+build_config:
+  target_platform: "native"
