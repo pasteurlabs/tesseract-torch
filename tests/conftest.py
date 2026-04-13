@@ -21,3 +21,11 @@ def vectoradd_tess() -> Tesseract:
 def nested_tess() -> Tesseract:
     """Load the nested-schema test Tesseract."""
     return Tesseract.from_tesseract_api(here / "nested_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="module")
+def forwardonly_tess() -> Tesseract:
+    """Load a Tesseract that only has an apply endpoint (no JVP/VJP)."""
+    return Tesseract.from_tesseract_api(
+        here / "forwardonly_tesseract" / "tesseract_api.py"
+    )

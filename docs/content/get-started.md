@@ -60,6 +60,6 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
 
 ## Sharp edges
 
-- **Required endpoints**: Using `apply_tesseract` with reverse-mode AD (`.backward()`, `torch.autograd.grad`) requires the Tesseract to define a [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) endpoint. Forward-mode AD (`torch.autograd.forward_ad`) requires [`jacobian_vector_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#jacobian-vector-product).
+- **Required endpoints**: Using `apply_tesseract` with reverse-mode AD (`.backward()`, `torch.autograd.grad`) requires the Tesseract to define a [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) endpoint. Forward-mode AD (`torch.autograd.forward_ad`) requires [`jacobian_vector_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#jacobian-vector-product). If these endpoints are not implemented, a `NotImplementedError` will be raised when the respective AD mode is triggered. The forward pass (`apply_tesseract` itself) works regardless of which AD endpoints are available.
 
 - **Non-differentiable inputs/outputs**: Only inputs and outputs marked as `Differentiable[...]` in the Tesseract schema participate in gradient computation. See the [Handling Differentiability](handling-differentiability.md) page for details.

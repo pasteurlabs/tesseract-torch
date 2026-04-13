@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+import pytest
 import torch
 import torch.autograd.forward_ad as fwAD
 
@@ -161,3 +162,36 @@ def test_nested_forward_mode_jvp(nested_tess):
     assert tangent_out is not None
     # new_v = v * 10 + w, so d(new_v)/dv = 10*I -> tangent = 10 * [1, 0, 0]
     assert torch.allclose(tangent_out, torch.tensor([10.0, 0.0, 0.0]), atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Missing endpoint error handling
+# ---------------------------------------------------------------------------
+
+
+def test_forward_pass_without_ad_endpoints(forwardonly_tess):
+    """Forward pass works even when JVP/VJP endpoints are missing."""
+    a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+    result = apply_tesseract(forwardonly_tess, {"a": a})
+
+    assert torch.allclose(result["b"], torch.tensor([2.0, 4.0, 6.0]))
+
+
+def test_backward_raises_without_vjp_endpoint(forwardonly_tess):
+    """Reverse-mode AD raises NotImplementedError when VJP endpoint is missing."""
+    a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, requires_grad=True)
+    result = apply_tesseract(forwardonly_tess, {"a": a})
+
+    with pytest.raises(NotImplementedError, match="VJP"):
+        result["b"].sum().backward()
+
+
+def test_forward_ad_raises_without_jvp_endpoint(forwardonly_tess):
+    """Forward-mode AD raises NotImplementedError when JVP endpoint is missing."""
+    a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+    tangent = torch.ones_like(a)
+
+    with pytest.raises(NotImplementedError, match="JVP"):
+        with fwAD.dual_level():
+            a_dual = fwAD.make_dual(a, tangent)
+            apply_tesseract(forwardonly_tess, {"a": a_dual})
