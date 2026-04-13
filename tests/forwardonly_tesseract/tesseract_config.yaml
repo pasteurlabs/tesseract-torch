@@ -1,0 +1,7 @@
+name: forwardonly_tesseract
+version: "2025-11-05"
+description: |
+  Tesseract with only an apply endpoint (no JVP or VJP).
+
+build_config:
+  target_platform: "native"
