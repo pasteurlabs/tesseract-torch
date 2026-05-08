@@ -23,7 +23,7 @@ def _to_tensor(arr: Any) -> torch.Tensor:
     a = np.asarray(arr)
     if not a.flags.writeable:
         a = a.copy()
-    return torch.as_tensor(a, dtype=torch.float32)
+    return torch.as_tensor(a)
 
 
 def _get_differentiable_arrays(
