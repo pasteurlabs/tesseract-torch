@@ -26,6 +26,28 @@ def _to_tensor(arr: Any) -> torch.Tensor:
     return torch.as_tensor(a)
 
 
+def _tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
+    """Convert a torch tensor to a numpy array, preserving dtype."""
+    # torch.func transforms (vjp, jvp, grad, vmap) wrap tensors in a C++
+    # FunctionalTensorWrapper that has no backing storage.  These tensors
+    # report type(t)==torch.Tensor (no Python subclass), so there is no
+    # isinstance check we can use.  Instead we probe data_ptr(), the same
+    # public precondition that .numpy() relies on, to raise an actionable
+    # error instead of the confusing default message ("Cannot access data
+    # pointer of Tensor that doesn't have storage").
+    try:
+        t.data_ptr()
+    except RuntimeError:
+        raise RuntimeError(
+            "apply_tesseract does not support torch.func transforms "
+            "(torch.func.vjp, torch.func.jvp, torch.func.grad, etc.). "
+            "Use the standard autograd API instead:\n"
+            "  - Reverse mode: result['y'].backward() or torch.autograd.grad()\n"
+            "  - Forward mode: torch.autograd.forward_ad (dual tensors)"
+        ) from None
+    return t.detach().cpu().numpy()
+
+
 def _get_differentiable_arrays(
     openapi_schema: dict,
     component: str,
@@ -119,7 +141,7 @@ class _TesseractFunction(torch.autograd.Function):
         """
         flat_inputs = dict(static_inputs)
         for name, tensor in zip(diff_input_names, tensors, strict=True):
-            flat_inputs[name] = tensor.detach().cpu().numpy()
+            flat_inputs[name] = _tensor_to_numpy(tensor)
 
         result = tesseract.apply(_unflatten_pytree(flat_inputs))
         flat_result = dict(_flatten_pytree(result, recurse_into=all_paths))
@@ -152,7 +174,7 @@ class _TesseractFunction(torch.autograd.Function):
 
         saved_inputs: dict[str, Any] = dict(static_inputs)
         for name, tensor in zip(diff_input_names, tensors, strict=True):
-            saved_inputs[name] = tensor.detach().cpu().numpy()
+            saved_inputs[name] = _tensor_to_numpy(tensor)
         ctx.saved_inputs = saved_inputs
 
     @staticmethod
@@ -162,7 +184,7 @@ class _TesseractFunction(torch.autograd.Function):
     ) -> tuple[None | torch.Tensor, ...]:
         """Reverse-mode AD via the Tesseract's VJP endpoint."""
         cotangent_vector = {
-            name: grad.detach().cpu().numpy()
+            name: _tensor_to_numpy(grad)
             for name, grad in zip(ctx.diff_output_names, grad_outputs, strict=True)
         }
 
@@ -196,7 +218,7 @@ class _TesseractFunction(torch.autograd.Function):
         jvp_inputs: list[str] = []
         for name, t in zip(ctx.diff_input_names, tensor_tangents, strict=True):
             if t is not None:
-                tangent_vector[name] = t.detach().cpu().numpy()
+                tangent_vector[name] = _tensor_to_numpy(t)
                 jvp_inputs.append(name)
 
         if not jvp_inputs:
@@ -278,7 +300,7 @@ def apply_tesseract(
             diff_names.append(path)
             diff_tensors.append(value)
         elif isinstance(value, torch.Tensor):
-            static[path] = value.detach().cpu().numpy()
+            static[path] = _tensor_to_numpy(value)
         else:
             static[path] = value
 
