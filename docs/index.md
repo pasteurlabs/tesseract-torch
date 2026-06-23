@@ -41,6 +41,5 @@ examples/simple/demo.ipynb
 :maxdepth: 2
 :hidden:
 
-Tesseract Core docs <https://docs.pasteurlabs.ai/projects/tesseract-core/latest/>
 Tesseract User Forums <https://si-tesseract.discourse.group/>
 ```
