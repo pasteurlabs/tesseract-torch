@@ -38,19 +38,26 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools", "versioneer[toml]==0.29"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling", "hatch-vcs", "setuptools-scm!=9.0.0"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-include = ["tesseract_torch", "tesseract_torch.*"]
+[tool.hatch.version]
+source = "vcs"
 
-[tool.versioneer]
-VCS = "git"
-style = "pep440"
-versionfile_source = "tesseract_torch/_version.py"
-versionfile_build = "tesseract_torch/_version.py"
-tag_prefix = "v"
-parentdir_prefix = "tesseract_torch-"
+[tool.hatch.build.hooks.vcs]
+version-file = "tesseract_torch/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tesseract_torch"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "tesseract_torch/",
+    "examples/",
+    "requirements.txt",
+    "README.md",
+    "LICENSE",
+]
 
 [tool.pytest.ini_options]
 addopts = ["--typeguard-packages=tesseract_torch"]
