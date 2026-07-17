@@ -8,10 +8,9 @@ PyTorch operation supporting both reverse-mode (``.backward()``) and forward-mod
 (``torch.autograd.forward_ad``) automatic differentiation.
 """
 
-from . import _version
+from ._version import __version__ as scm_version
 from .function import apply_tesseract
 
-__version__ = _version.get_versions()["version"]
-del _version
+__version__ = scm_version
 
 __all__ = ["apply_tesseract"]
