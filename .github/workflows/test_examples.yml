@@ -16,7 +16,7 @@ jobs:
         # ruff.toml, setup.py and other CI files as well.
 
         # test with oldest supported Python version only (for slow tests)
-        python-version: ["3.10"]
+        python-version: ["3.12"]
 
         example:
           - simple
