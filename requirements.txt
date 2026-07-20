@@ -16,7 +16,7 @@ cuda-pathfinder==1.5.6 ; sys_platform == 'linux'
     # via cuda-bindings
 cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
     # via torch
-filelock==3.30.3
+filelock==3.31.0
     # via torch
 fsspec==2026.4.0
     # via torch
