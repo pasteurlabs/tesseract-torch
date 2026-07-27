@@ -191,7 +191,6 @@ def test_forward_ad_raises_without_jvp_endpoint(forwardonly_tess):
     a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
     tangent = torch.ones_like(a)
 
-    with pytest.raises(NotImplementedError, match="JVP"):
-        with fwAD.dual_level():
-            a_dual = fwAD.make_dual(a, tangent)
-            apply_tesseract(forwardonly_tess, {"a": a_dual})
+    with pytest.raises(NotImplementedError, match="JVP"), fwAD.dual_level():
+        a_dual = fwAD.make_dual(a, tangent)
+        apply_tesseract(forwardonly_tess, {"a": a_dual})

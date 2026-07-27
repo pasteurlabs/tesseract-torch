@@ -181,7 +181,7 @@ class _TesseractFunction(torch.autograd.Function):
     def backward(
         ctx: Any,
         *grad_outputs: torch.Tensor,
-    ) -> tuple[None | torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor | None, ...]:
         """Reverse-mode AD via the Tesseract's VJP endpoint."""
         cotangent_vector = {
             name: _tensor_to_numpy(grad)
