@@ -2,9 +2,9 @@
 #    uv export --frozen --color never --no-emit-project --no-hashes
 annotated-doc==0.0.4
     # via typer
-annotated-types==0.7.0
+annotated-types==0.8.0
     # via pydantic
-certifi==2026.6.17
+certifi==2026.7.22
     # via requests
 charset-normalizer==3.4.9
     # via requests
@@ -12,13 +12,13 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
 cuda-bindings==13.3.1 ; sys_platform == 'linux'
     # via torch
-cuda-pathfinder==1.5.6 ; sys_platform == 'linux'
+cuda-pathfinder==1.6.0 ; sys_platform == 'linux'
     # via cuda-bindings
 cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
     # via torch
-filelock==3.31.0
+filelock==3.32.0
     # via torch
-fsspec==2026.4.0
+fsspec==2026.6.0
     # via torch
 idna==3.18
     # via requests
@@ -36,7 +36,7 @@ mpmath==1.3.0
     # via sympy
 networkx==3.6.1
     # via torch
-numpy==2.4.6
+numpy==2.5.1
     # via tesseract-core
 nvidia-cublas==13.1.1.3 ; sys_platform == 'linux'
     # via
@@ -107,13 +107,13 @@ shellingham==1.5.4
     # via typer
 sympy==1.14.0
     # via torch
-tesseract-core==1.10.0
+tesseract-core==1.11.0
     # via tesseract-torch
 torch==2.13.0
     # via tesseract-torch
 triton==3.7.1 ; sys_platform == 'linux'
     # via torch
-typer==0.26.7
+typer==0.27.0
     # via tesseract-core
 typing-extensions==4.16.0
     # via
