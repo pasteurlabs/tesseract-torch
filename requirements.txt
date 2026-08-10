@@ -81,9 +81,9 @@ nvidia-nvtx==13.0.85 ; (platform_machine == 'aarch64' and sys_platform == 'linux
     # via cuda-toolkit
 orjson==3.11.9
     # via tesseract-core
-packaging==26.2
+packaging==26.3
     # via tesseract-core
-pip==26.2
+pip==26.2.1
     # via tesseract-core
 pybase64==1.4.3
     # via tesseract-core
@@ -101,7 +101,7 @@ rich==15.0.0
     # via
     #   tesseract-core
     #   typer
-setuptools==83.0.0
+setuptools==84.0.0
     # via torch
 shellingham==1.5.4
     # via typer
