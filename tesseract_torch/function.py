@@ -100,6 +100,95 @@ def _should_recurse(
     return any(p.startswith(dot_prefix) for p in known_paths)
 
 
+# ---------------------------------------------------------------------------
+# Wildcard paths
+# ---------------------------------------------------------------------------
+#
+# tesseract-core encodes a container-valued differentiable field as a template
+# rather than a concrete path: ``dict[str, Differentiable[...]]`` is declared as
+# ``params.{}``. The wire name the runtime accepts puts the concrete key in the
+# braces, ``params.{p}``, because its own path regex compiles the sentinel to
+# ``\{[\w \-]+\}``. Neither ``params.p`` nor ``params.{}`` is accepted.
+#
+# So a concrete leaf path and the name used to talk to the Tesseract are not
+# the same string, and both are needed: the concrete path rebuilds the input
+# pytree, the wire name addresses the endpoint.
+
+_DICT_WILDCARD = "{}"
+_LIST_WILDCARD = "[]"
+
+
+def _is_templated(path: str) -> bool:
+    """True when *path* carries a container wildcard segment."""
+    parts = path.split(".")
+    return _DICT_WILDCARD in parts or _LIST_WILDCARD in parts
+
+
+def _wire_name(concrete_path: str, templates: set[str]) -> str | None:
+    """Map a concrete leaf path to the name the Tesseract expects.
+
+    Returns ``None`` when no declared path covers it, which is how the caller
+    tells a differentiable leaf from a static one.
+    """
+    if concrete_path in templates:
+        return concrete_path
+
+    concrete_parts = concrete_path.split(".")
+    for template in templates:
+        template_parts = template.split(".")
+        if len(template_parts) != len(concrete_parts):
+            continue
+        resolved: list[str] = []
+        for tpl, concrete in zip(template_parts, concrete_parts, strict=True):
+            if tpl == _DICT_WILDCARD:
+                resolved.append("{" + concrete + "}")
+            elif tpl == _LIST_WILDCARD:
+                # Handled up front by _reject_list_wildcards; a list field is
+                # an opaque leaf here, so this branch is defensive only.
+                return None
+            elif tpl != concrete:
+                break
+            else:
+                resolved.append(concrete)
+        else:
+            return ".".join(resolved)
+    return None
+
+
+def _reject_list_wildcards(templates: set[str], where: str) -> None:
+    """Raise a clear error for list-valued differentiable fields.
+
+    ``_flatten_pytree`` only descends into dicts, so a list field arrives as
+    one opaque leaf and its tensors are never registered for autograd. Left
+    alone that surfaces as "element 0 of tensors does not require grad", which
+    says nothing about the cause.
+    """
+    offenders = sorted(t for t in templates if _LIST_WILDCARD in t.split("."))
+    if offenders:
+        raise NotImplementedError(
+            f"List-valued differentiable {where} are not supported yet: "
+            f"{', '.join(offenders)}. Use a dict-valued field, or keep the "
+            f"list entries as separate schema fields."
+        )
+
+
+def _resolve_output_names(
+    flat_result: dict[str, Any], templates: list[str]
+) -> list[tuple[str, str]]:
+    """Pair each concrete output leaf with its wire name, in a stable order.
+
+    Concrete keys of a dict-valued output are not knowable until ``apply``
+    returns, so the differentiable output list is resolved here rather than
+    derived from the schema up front.
+    """
+    resolved: list[tuple[str, str]] = []
+    for concrete in sorted(flat_result):
+        wire = _wire_name(concrete, set(templates))
+        if wire is not None:
+            resolved.append((concrete, wire))
+    return resolved
+
+
 def _unflatten_pytree(flat: dict[str, Any]) -> dict[str, Any]:
     """Reconstruct a nested dict from ``{dotted_path: value}``."""
     tree: dict[str, Any] = {}
@@ -126,31 +215,38 @@ class _TesseractFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         tesseract: Tesseract,
-        diff_input_names: list[str],
-        diff_output_names: list[str],
+        diff_input_paths: list[str],
+        diff_input_wires: list[str],
+        diff_output_templates: list[str],
         all_paths: set[str],
         static_inputs: dict[str, Any],
-        non_diff_result_holder: list[dict[str, Any]],
+        non_diff_result_holder: list[Any],
         *tensors: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         """Run the Tesseract forward pass, returning differentiable outputs.
 
-        The full (flat) result dict is stashed in *non_diff_result_holder*
-        so the caller can reconstruct non-differentiable outputs without a
-        second ``apply()`` call.
+        The full (flat) result dict and the resolved output names are stashed
+        in *non_diff_result_holder* so the caller can reconstruct
+        non-differentiable outputs without a second ``apply()`` call.
+
+        Output names are resolved here rather than passed in: a dict-valued
+        differentiable output is declared as a template, and its concrete keys
+        only exist once ``apply`` has returned.
         """
         flat_inputs = dict(static_inputs)
-        for name, tensor in zip(diff_input_names, tensors, strict=True):
-            flat_inputs[name] = _tensor_to_numpy(tensor)
+        for path, tensor in zip(diff_input_paths, tensors, strict=True):
+            flat_inputs[path] = _tensor_to_numpy(tensor)
 
         result = tesseract.apply(_unflatten_pytree(flat_inputs))
         flat_result = dict(_flatten_pytree(result, recurse_into=all_paths))
 
-        # Stash full result for the caller
-        non_diff_result_holder.append(flat_result)
+        resolved_outputs = _resolve_output_names(flat_result, diff_output_templates)
 
-        # Return only the differentiable output tensors (in sorted order)
-        return tuple(_to_tensor(flat_result[name]) for name in diff_output_names)
+        # Stash full result + resolved output names for the caller
+        non_diff_result_holder.append(flat_result)
+        non_diff_result_holder.append(resolved_outputs)
+
+        return tuple(_to_tensor(flat_result[c]) for c, _ in resolved_outputs)
 
     @staticmethod
     def setup_context(
@@ -161,21 +257,31 @@ class _TesseractFunction(torch.autograd.Function):
         """Save forward-pass metadata for use in backward / jvp."""
         (
             tesseract,
-            diff_input_names,
-            diff_output_names,
+            diff_input_paths,
+            diff_input_wires,
+            diff_output_templates,  # noqa: RUF059
             all_paths,  # noqa: RUF059
             static_inputs,
-            _holder,
+            holder,
             *tensors,
         ) = inputs
         ctx.tesseract = tesseract
-        ctx.diff_input_names = diff_input_names
-        ctx.diff_output_names = diff_output_names
+        ctx.diff_input_paths = diff_input_paths
+        # Wire names address the endpoint; concrete paths rebuild the pytree.
+        ctx.diff_input_wires = diff_input_wires
 
+        # This conversion is also the torch.func rejection guard: under those
+        # transforms the tensors arrive storage-less and it raises a documented
+        # RuntimeError. Keep it ahead of anything that reads the holder, which
+        # is unpopulated on that path and would surface a bare IndexError first.
         saved_inputs: dict[str, Any] = dict(static_inputs)
-        for name, tensor in zip(diff_input_names, tensors, strict=True):
-            saved_inputs[name] = _tensor_to_numpy(tensor)
+        for path, tensor in zip(diff_input_paths, tensors, strict=True):
+            saved_inputs[path] = _tensor_to_numpy(tensor)
         ctx.saved_inputs = saved_inputs
+
+        # Output names are resolved in forward(), since a dict-valued output
+        # has no concrete keys until apply() has returned.
+        ctx.diff_output_wires = [wire for _, wire in holder[1]]
 
     @staticmethod
     def backward(
@@ -184,25 +290,25 @@ class _TesseractFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor | None, ...]:
         """Reverse-mode AD via the Tesseract's VJP endpoint."""
         cotangent_vector = {
-            name: _tensor_to_numpy(grad)
-            for name, grad in zip(ctx.diff_output_names, grad_outputs, strict=True)
+            wire: _tensor_to_numpy(grad)
+            for wire, grad in zip(ctx.diff_output_wires, grad_outputs, strict=True)
         }
 
         vjp_result = ctx.tesseract.vector_jacobian_product(
             inputs=_unflatten_pytree(ctx.saved_inputs),
-            vjp_inputs=list(ctx.diff_input_names),
-            vjp_outputs=list(ctx.diff_output_names),
+            vjp_inputs=list(ctx.diff_input_wires),
+            vjp_outputs=list(ctx.diff_output_wires),
             cotangent_vector=cotangent_vector,
         )
 
         grad_inputs: list[torch.Tensor | None] = []
-        for name in ctx.diff_input_names:
-            g = vjp_result.get(name)
+        for wire in ctx.diff_input_wires:
+            g = vjp_result.get(wire)
             grad_inputs.append(_to_tensor(g) if g is not None else None)
 
-        # None for (tesseract, diff_input_names, diff_output_names,
-        #           all_paths, static_inputs, non_diff_result_holder)
-        return (None, None, None, None, None, None, *grad_inputs)
+        # None for (tesseract, diff_input_paths, diff_input_wires,
+        #           diff_output_templates, all_paths, static_inputs, holder)
+        return (None, None, None, None, None, None, None, *grad_inputs)
 
     @staticmethod
     def jvp(
@@ -210,31 +316,32 @@ class _TesseractFunction(torch.autograd.Function):
         *tangents: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...]:
         """Forward-mode AD via the Tesseract's JVP endpoint."""
-        # tangents: (tesseract, diff_input_names, diff_output_names,
-        #            all_paths, static_inputs, holder, *tensor_tangents)
-        tensor_tangents = tangents[6:]
+        # tangents: (tesseract, diff_input_paths, diff_input_wires,
+        #            diff_output_templates, all_paths, static_inputs, holder,
+        #            *tensor_tangents)
+        tensor_tangents = tangents[7:]
 
         tangent_vector: dict[str, Any] = {}
         jvp_inputs: list[str] = []
-        for name, t in zip(ctx.diff_input_names, tensor_tangents, strict=True):
+        for wire, t in zip(ctx.diff_input_wires, tensor_tangents, strict=True):
             if t is not None:
-                tangent_vector[name] = _tensor_to_numpy(t)
-                jvp_inputs.append(name)
+                tangent_vector[wire] = _tensor_to_numpy(t)
+                jvp_inputs.append(wire)
 
         if not jvp_inputs:
             return tuple(
-                torch.zeros_like(_to_tensor(ctx.saved_inputs.get(name, 0.0)))
-                for name in ctx.diff_output_names
+                torch.zeros_like(_to_tensor(ctx.saved_inputs.get(path, 0.0)))
+                for path in ctx.diff_input_paths[: len(ctx.diff_output_wires)]
             )
 
         jvp_result = ctx.tesseract.jacobian_vector_product(
             inputs=_unflatten_pytree(ctx.saved_inputs),
             jvp_inputs=jvp_inputs,
-            jvp_outputs=list(ctx.diff_output_names),
+            jvp_outputs=list(ctx.diff_output_wires),
             tangent_vector=tangent_vector,
         )
 
-        return tuple(_to_tensor(jvp_result[name]) for name in ctx.diff_output_names)
+        return tuple(_to_tensor(jvp_result[wire]) for wire in ctx.diff_output_wires)
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +389,9 @@ def apply_tesseract(
     openapi = tesseract.openapi_schema
     diff_in_paths = _get_differentiable_arrays(openapi, "ApplyInputSchema")
     diff_out_paths = _get_differentiable_arrays(openapi, "ApplyOutputSchema")
-    diff_out_names = sorted(diff_out_paths)
+    _reject_list_wildcards(diff_in_paths, "inputs")
+    _reject_list_wildcards(diff_out_paths, "outputs")
+    diff_out_templates = sorted(diff_out_paths)
 
     # All known dotted paths guide pytree flattening so we recurse into
     # sub-models but not into opaque dict fields.
@@ -290,14 +399,21 @@ def apply_tesseract(
 
     flat_inputs = _flatten_pytree(inputs, recurse_into=all_paths)
 
-    # Partition into differentiable tensors vs static values
-    diff_names: list[str] = []
+    # Partition into differentiable tensors vs static values. A declared path
+    # may be a template, so match rather than compare: ``params.{}`` covers the
+    # concrete leaf ``params.p`` and is addressed on the wire as ``params.{p}``.
+    diff_paths: list[str] = []
+    diff_wires: list[str] = []
     diff_tensors: list[torch.Tensor] = []
     static: dict[str, Any] = {}
 
     for path, value in flat_inputs:
-        if path in diff_in_paths and isinstance(value, torch.Tensor):
-            diff_names.append(path)
+        wire = (
+            _wire_name(path, diff_in_paths) if isinstance(value, torch.Tensor) else None
+        )
+        if wire is not None:
+            diff_paths.append(path)
+            diff_wires.append(wire)
             diff_tensors.append(value)
         elif isinstance(value, torch.Tensor):
             static[path] = _tensor_to_numpy(value)
@@ -306,21 +422,24 @@ def apply_tesseract(
 
     # Mutable holder so forward() can pass the full result dict back to us
     # without going through autograd's return values.
-    result_holder: list[dict[str, Any]] = []
+    result_holder: list[Any] = []
 
     output_tensors = _TesseractFunction.apply(
         tesseract,
-        diff_names,
-        diff_out_names,
+        diff_paths,
+        diff_wires,
+        diff_out_templates,
         all_paths,
         static,
         result_holder,
         *diff_tensors,
     )
 
-    # Reconstruct full output pytree
+    # Reconstruct full output pytree. Names were resolved inside forward(),
+    # since a dict-valued output has no concrete keys until apply() returns.
     flat_result = dict(result_holder[0])
-    for name, tensor in zip(diff_out_names, output_tensors, strict=True):
-        flat_result[name] = tensor
+    resolved_outputs = result_holder[1]
+    for (concrete, _wire), tensor in zip(resolved_outputs, output_tensors, strict=True):
+        flat_result[concrete] = tensor
 
     return _unflatten_pytree(flat_result)
