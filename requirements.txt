@@ -10,9 +10,9 @@ charset-normalizer==3.5.1
     # via requests
 colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
-cuda-bindings==13.3.1 ; sys_platform == 'linux'
+cuda-bindings==13.3.1 ; python_full_version < '3.15' and sys_platform == 'linux'
     # via torch
-cuda-pathfinder==1.6.0 ; sys_platform == 'linux'
+cuda-pathfinder==1.6.0 ; python_full_version < '3.15' and sys_platform == 'linux'
     # via cuda-bindings
 cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
     # via torch
@@ -111,7 +111,7 @@ tesseract-core==1.11.0
     # via tesseract-torch
 torch==2.13.0
     # via tesseract-torch
-triton==3.7.1 ; sys_platform == 'linux'
+triton==3.7.1 ; python_full_version < '3.15' and sys_platform == 'linux'
     # via torch
 typer==0.27.0
     # via tesseract-core
