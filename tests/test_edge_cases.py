@@ -388,6 +388,7 @@ class TestAutogradGraphIntegrity:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestCUDA:
     def test_cuda_tensor_forward(self, vectoradd_tess):
@@ -398,9 +399,43 @@ class TestCUDA:
         assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))
 
     def test_cuda_tensor_backward(self, vectoradd_tess):
-        """CUDA tensors support backward pass."""
+        """CUDA tensors support backward pass, with the gradient on the same device.
+
+        Regression test: the VJP result is decoded from the Tesseract's
+        response (always host memory here, since this call doesn't opt into
+        cuda_ipc), but autograd requires the gradient returned for a CUDA
+        input to itself be a CUDA tensor -- returning a CPU tensor raises
+        "invalid gradient ... expected device cuda:0 but got cpu".
+        """
         a = torch.tensor([1.0, 2.0, 3.0], device="cuda", requires_grad=True)
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
         result["c"].sum().backward()
         assert a.grad is not None
+        assert a.grad.device.type == "cuda"
+        assert torch.allclose(a.grad.cpu(), torch.ones(3))
+
+    def test_cuda_tensor_backward_mixed_devices(self, nested_tess):
+        """Each input's gradient lands on that input's own device, independently.
+
+        ``vectors.v`` (CUDA) and ``scalars.a`` (CPU) are both differentiable
+        inputs to the same call; their gradients must not be conflated onto a
+        single device. Uses ``v`` (non-scalar) for the CUDA side: PyTorch's
+        autograd engine silently accepts a 0-dim CPU gradient for a CUDA
+        scalar leaf (it does not enforce the device match for scalars), so
+        a scalar input would not actually exercise this fix.
+        """
+        a = torch.tensor(5.0, requires_grad=True)
+        v = torch.tensor([1.0, 2.0, 3.0], device="cuda", requires_grad=True)
+        inputs = {
+            "scalars": {"a": a, "b": 2.0},
+            "vectors": {"v": v, "w": [0.0, 1.0, 2.0]},
+            "other_stuff": {"s": "x", "i": 1, "f": 1.0},
+        }
+        result = apply_tesseract(nested_tess, inputs)
+        loss = result["scalars"]["a"].sum() + result["vectors"]["v"].sum()
+        loss.backward()
+        assert a.grad.device.type == "cpu"
+        assert v.grad.device.type == "cuda"
+        assert torch.allclose(a.grad, torch.tensor(10.0))
+        assert torch.allclose(v.grad.cpu(), torch.full((3,), 10.0))
