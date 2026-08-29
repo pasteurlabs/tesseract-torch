@@ -160,7 +160,7 @@ def test_tensor_to_numpy_or_cuda_rejects_functional_tensors():
     def f(x: torch.Tensor) -> np.ndarray:
         return _tensor_to_numpy_or_cuda(x)
 
-    with pytest.raises(RuntimeError, match="torch.func transforms"):
+    with pytest.raises(RuntimeError, match=r"torch\.func transforms"):
         func.grad(f)(torch.tensor(1.0))
 
 
@@ -201,7 +201,9 @@ def test_supports_cuda_ipc_false_when_no_client():
 
 
 def test_cuda_ipc_mode_toggles_and_restores_http_client():
-    """A fresh ``HTTPClient``'s ``requests.Session`` always has a default
+    """Verify the toggle restores the default ``Accept`` header.
+
+    A fresh ``HTTPClient``'s ``requests.Session`` always has a default
     ``Accept: */*`` header, so the "prior" value the toggle restores is that
     default, not an absent header.
     """

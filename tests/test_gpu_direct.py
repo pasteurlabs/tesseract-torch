@@ -76,7 +76,7 @@ def test_jvp_through_cuda_ipc(served_gpu_tesseract):
         out = apply_tesseract(
             served_gpu_tesseract, {"a": a_dual, "b": b_dual}, cuda_ipc=True
         )
-        primal, tangent = fwAD.unpack_dual(out["c"])
+        _primal, tangent = fwAD.unpack_dual(out["c"])
 
     assert tangent.is_cuda
     # c = a*scale + b, scale=2 => dc = scale*da + db = 2*ta + tb = 2.
