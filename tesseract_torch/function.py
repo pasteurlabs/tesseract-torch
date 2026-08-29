@@ -328,12 +328,6 @@ class _TesseractFunction(torch.autograd.Function):
                 tangent_vector[wire] = _tensor_to_numpy(t)
                 jvp_inputs.append(wire)
 
-        if not jvp_inputs:
-            return tuple(
-                torch.zeros_like(_to_tensor(ctx.saved_inputs.get(path, 0.0)))
-                for path in ctx.diff_input_paths[: len(ctx.diff_output_wires)]
-            )
-
         jvp_result = ctx.tesseract.jacobian_vector_product(
             inputs=_unflatten_pytree(ctx.saved_inputs),
             jvp_inputs=jvp_inputs,
