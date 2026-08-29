@@ -404,3 +404,53 @@ class TestCUDA:
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
         result["c"].sum().backward()
         assert a.grad is not None
+
+
+# ---------------------------------------------------------------------------
+# Edge paths in function.py
+# ---------------------------------------------------------------------------
+
+
+class TestFlattenEdgePaths:
+    """Shapes the pytree walk has to keep rather than descend into."""
+
+    def test_empty_sub_dict_stays_a_leaf(self):
+        """An empty dict is a value, not a branch to walk.
+
+        Recursing into it would yield nothing, so the key would drop out of
+        the flattened inputs entirely and never reach the Tesseract.
+        """
+        from tesseract_torch.function import _flatten_pytree
+
+        tree = {"a": 1, "empty": {}, "nested": {"b": 2}}
+        assert dict(_flatten_pytree(tree)) == {"a": 1, "empty": {}, "nested.b": 2}
+        assert dict(_flatten_pytree(tree, recurse_into={"nested.b"})) == {
+            "a": 1,
+            "empty": {},
+            "nested.b": 2,
+        }
+
+
+class TestPartialForwardTangents:
+    """Forward mode when only some differentiable inputs carry a tangent."""
+
+    @pytest.mark.parametrize("seeded", ["a", "b"])
+    def test_only_the_seeded_input_is_sent(self, nonlinear_tess, seeded):
+        """Seeding one input gives its own term and not the other's.
+
+        The fixture is ``y = a**3 + b*a``, so the two inputs have different
+        derivatives and sending the wrong wire would be visible in the value.
+        """
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        tangent_in = torch.tensor([2.0, 2.0, 2.0], dtype=torch.float64)
+
+        expected = (3 * a**2 + b) if seeded == "a" else a
+
+        with fwAD.dual_level():
+            inputs = {"a": a, "b": b}
+            inputs[seeded] = fwAD.make_dual(inputs[seeded], tangent_in)
+            out = apply_tesseract(nonlinear_tess, inputs)["y"]
+            tangent = fwAD.unpack_dual(out).tangent
+
+        torch.testing.assert_close(tangent, expected * tangent_in)
