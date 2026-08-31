@@ -27,6 +27,14 @@ def vectoradd_tess() -> Tesseract:
 
 
 @pytest.fixture(scope="module")
+def nonlinear_tess() -> Tesseract:
+    """Cubic with a cross term, so the Jacobian depends on the input point."""
+    return Tesseract.from_tesseract_api(
+        here / "nonlinear_tesseract" / "tesseract_api.py"
+    )
+
+
+@pytest.fixture(scope="module")
 def nested_tess() -> Tesseract:
     """Load the nested-schema test Tesseract."""
     return Tesseract.from_tesseract_api(here / "nested_tesseract" / "tesseract_api.py")
