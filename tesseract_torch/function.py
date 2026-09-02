@@ -427,11 +427,10 @@ class _TesseractFunction(torch.autograd.Function):
                 )
                 jvp_inputs.append(wire)
 
-        if not jvp_inputs:
-            return tuple(
-                torch.zeros_like(_to_tensor(ctx.saved_inputs.get(path, 0.0)))
-                for path in ctx.diff_input_paths[: len(ctx.diff_output_wires)]
-            )
+        # apply_tesseract only routes tensors on a differentiable path into the
+        # autograd Function, so torch calls jvp only when at least one carries a
+        # forward tangent. jvp_inputs is therefore never empty here.
+        assert jvp_inputs, "jvp called with no forward tangents"
 
         with (
             _cuda_ipc_mode(ctx.tesseract) if ctx.cuda_ipc else contextlib.nullcontext()
