@@ -423,12 +423,9 @@ class TestFlattenEdgePaths:
         from tesseract_torch.function import _flatten_pytree
 
         tree = {"a": 1, "empty": {}, "nested": {"b": 2}}
-        assert dict(_flatten_pytree(tree)) == {"a": 1, "empty": {}, "nested.b": 2}
-        assert dict(_flatten_pytree(tree, recurse_into={"nested.b"})) == {
-            "a": 1,
-            "empty": {},
-            "nested.b": 2,
-        }
+        expected = {("a",): 1, ("empty",): {}, ("nested", "b"): 2}
+        assert dict(_flatten_pytree(tree)) == expected
+        assert dict(_flatten_pytree(tree, recurse_into={"nested.b"})) == expected
 
 
 class TestPartialForwardTangents:
@@ -454,3 +451,18 @@ class TestPartialForwardTangents:
             tangent = fwAD.unpack_dual(out).tangent
 
         torch.testing.assert_close(tangent, expected * tangent_in)
+
+
+class TestDottedDictKeys:
+    """A dict key is free to contain a dot, and the key is where the path ends."""
+
+    @pytest.mark.parametrize("key", ["plain", "a/b", "a:b", "layer.0.weight"])
+    def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
+        """Joining segments and splitting again drops the dotted key.
+
+        It never gets a wire name, so its tensor is never registered for
+        autograd and backward reports that nothing requires grad.
+        """
+        x = torch.ones(3, requires_grad=True)
+        apply_tesseract(dict_key_tess, {"params": {key: x}})["result"].sum().backward()
+        torch.testing.assert_close(x.grad, torch.full((3,), 2.0))
