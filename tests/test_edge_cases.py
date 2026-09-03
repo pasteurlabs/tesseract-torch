@@ -453,10 +453,31 @@ class TestPartialForwardTangents:
         torch.testing.assert_close(tangent, expected * tangent_in)
 
 
+try:  # tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707
+    from tesseract_core.runtime.tree_transforms import split_path  # noqa: F401
+
+    _CORE_ACCEPTS_WIDE_KEYS = True
+except ImportError:  # pragma: no cover
+    _CORE_ACCEPTS_WIDE_KEYS = False
+
+_needs_wide_keys = pytest.mark.skipif(
+    not _CORE_ACCEPTS_WIDE_KEYS,
+    reason="runtime rejects these keys until tesseract-core#707 is released",
+)
+
+
 class TestDottedDictKeys:
     """A dict key is free to contain a dot, and the key is where the path ends."""
 
-    @pytest.mark.parametrize("key", ["plain", "a/b", "a:b", "layer.0.weight"])
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "plain",
+            pytest.param("a/b", marks=_needs_wide_keys),
+            pytest.param("a:b", marks=_needs_wide_keys),
+            pytest.param("layer.0.weight", marks=_needs_wide_keys),
+        ],
+    )
     def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
         """Joining segments and splitting again drops the dotted key.
 
