@@ -466,6 +466,51 @@ _needs_wide_keys = pytest.mark.skipif(
 )
 
 
+class TestPathHelpers:
+    """The path helpers, which decide where a key ends, exercised directly.
+
+    These need no runtime, so they cover the dotted-key handling on every
+    tesseract-core version, including ones that reject such keys on the wire.
+    """
+
+    def test_a_dotted_key_is_one_segment(self):
+        from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
+
+        flat = _flatten_pytree(
+            {"params": {"layer.0.weight": 1}}, recurse_into={"params.{}"}
+        )
+        assert flat == [(("params", "layer.0.weight"), 1)]
+        # The key survives the round trip rather than becoming nested dicts.
+        assert _unflatten_pytree(dict(flat)) == {"params": {"layer.0.weight": 1}}
+
+    def test_wire_name_puts_the_whole_key_in_the_braces(self):
+        from tesseract_torch.function import _wire_name
+
+        assert _wire_name(("params", "layer.0.weight"), {"params.{}"}) == (
+            "params.{layer.0.weight}"
+        )
+        assert _wire_name(("x",), {"x"}) == "x"
+        assert _wire_name(("nope",), {"params.{}"}) is None
+
+    @pytest.mark.parametrize(
+        "path,value,known,expected",
+        [
+            # An empty dict carries no leaves, so there is nothing to recurse into.
+            (("a",), {}, {"a.b"}, False),
+            # No declared paths means recurse everywhere.
+            (("a",), {"b": 1}, None, True),
+            (("a",), {"b": 1}, {"a.b"}, True),
+            (("a",), {"b": 1}, {"c.d"}, False),
+            # A path equal to a known leaf is not a *strict* prefix of it.
+            (("a", "b"), {"x": 1}, {"a.b"}, False),
+        ],
+    )
+    def test_should_recurse(self, path, value, known, expected):
+        from tesseract_torch.function import _should_recurse
+
+        assert _should_recurse(path, value, known) is expected
+
+
 class TestDottedDictKeys:
     """A dict key is free to contain a dot, and the key is where the path ends."""
 
