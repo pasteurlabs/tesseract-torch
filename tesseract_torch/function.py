@@ -64,21 +64,24 @@ def _get_differentiable_arrays(
 
 def _flatten_pytree(
     tree: dict[str, Any],
-    prefix: str = "",
+    prefix: tuple[str, ...] = (),
     *,
     recurse_into: set[str] | None = None,
-) -> list[tuple[str, Any]]:
-    """Flatten a nested dict into ``(dotted_path, leaf_value)`` pairs.
+) -> list[tuple[tuple[str, ...], Any]]:
+    """Flatten a nested dict into ``(path_parts, leaf_value)`` pairs.
 
-    Only recurses into sub-dicts whose dotted prefix is a strict prefix of at
-    least one path in *recurse_into*.  All other dicts are treated as opaque
-    leaf values (e.g. ``dict[str, Array]`` schema fields).
+    The path stays a tuple of segments rather than a dotted string because a
+    dict key is free to contain a dot, and joining loses where the key ends.
+
+    Only recurses into sub-dicts whose path is a strict prefix of at least one
+    path in *recurse_into*.  All other dicts are treated as opaque leaf values
+    (e.g. ``dict[str, Array]`` schema fields).
 
     If *recurse_into* is ``None``, every nested dict is recursed into.
     """
-    items: list[tuple[str, Any]] = []
+    items: list[tuple[tuple[str, ...], Any]] = []
     for key, value in tree.items():
-        path = f"{prefix}.{key}" if prefix else key
+        path = (*prefix, key)
         if isinstance(value, dict) and _should_recurse(path, value, recurse_into):
             items.extend(_flatten_pytree(value, path, recurse_into=recurse_into))
         else:
@@ -87,17 +90,20 @@ def _flatten_pytree(
 
 
 def _should_recurse(
-    path: str,
+    path: tuple[str, ...],
     value: dict,
     known_paths: set[str] | None,
 ) -> bool:
-    """Return True when *path* is a prefix of a known leaf path."""
+    """Return True when *path* is a strict prefix of a known leaf path."""
     if not value:
         return False
     if known_paths is None:
         return True
-    dot_prefix = path + "."
-    return any(p.startswith(dot_prefix) for p in known_paths)
+    depth = len(path)
+    return any(
+        len(parts) > depth and tuple(parts[:depth]) == path
+        for parts in (known.split(".") for known in known_paths)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +114,7 @@ def _should_recurse(
 # rather than a concrete path: ``dict[str, Differentiable[...]]`` is declared as
 # ``params.{}``. The wire name the runtime accepts puts the concrete key in the
 # braces, ``params.{p}``, because its own path regex compiles the sentinel to
-# ``\{[\w \-]+\}``. Neither ``params.p`` nor ``params.{}`` is accepted.
+# ``\{[^.]+\}``. Neither ``params.p`` nor ``params.{}`` is accepted.
 #
 # So a concrete leaf path and the name used to talk to the Tesseract are not
 # the same string, and both are needed: the concrete path rebuilds the input
@@ -124,16 +130,15 @@ def _is_templated(path: str) -> bool:
     return _DICT_WILDCARD in parts or _LIST_WILDCARD in parts
 
 
-def _wire_name(concrete_path: str, templates: set[str]) -> str | None:
+def _wire_name(concrete_parts: tuple[str, ...], templates: set[str]) -> str | None:
     """Map a concrete leaf path to the name the Tesseract expects.
 
     Returns ``None`` when no declared path covers it, which is how the caller
     tells a differentiable leaf from a static one.
     """
-    if concrete_path in templates:
-        return concrete_path
+    if ".".join(concrete_parts) in templates:
+        return ".".join(concrete_parts)
 
-    concrete_parts = concrete_path.split(".")
     for template in templates:
         template_parts = template.split(".")
         if len(template_parts) != len(concrete_parts):
@@ -173,15 +178,15 @@ def _reject_list_wildcards(templates: set[str], where: str) -> None:
 
 
 def _resolve_output_names(
-    flat_result: dict[str, Any], templates: list[str]
-) -> list[tuple[str, str]]:
+    flat_result: dict[tuple[str, ...], Any], templates: list[str]
+) -> list[tuple[tuple[str, ...], str]]:
     """Pair each concrete output leaf with its wire name, in a stable order.
 
     Concrete keys of a dict-valued output are not knowable until ``apply``
     returns, so the differentiable output list is resolved here rather than
     derived from the schema up front.
     """
-    resolved: list[tuple[str, str]] = []
+    resolved: list[tuple[tuple[str, ...], str]] = []
     for concrete in sorted(flat_result):
         wire = _wire_name(concrete, set(templates))
         if wire is not None:
@@ -189,11 +194,10 @@ def _resolve_output_names(
     return resolved
 
 
-def _unflatten_pytree(flat: dict[str, Any]) -> dict[str, Any]:
-    """Reconstruct a nested dict from ``{dotted_path: value}``."""
+def _unflatten_pytree(flat: dict[tuple[str, ...], Any]) -> dict[str, Any]:
+    """Reconstruct a nested dict from ``{path_parts: value}``."""
     tree: dict[str, Any] = {}
-    for path, value in flat.items():
-        parts = path.split(".")
+    for parts, value in flat.items():
         node = tree
         for part in parts[:-1]:
             node = node.setdefault(part, {})
@@ -215,11 +219,11 @@ class _TesseractFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         tesseract: Tesseract,
-        diff_input_paths: list[str],
+        diff_input_paths: list[tuple[str, ...]],
         diff_input_wires: list[str],
         diff_output_templates: list[str],
         all_paths: set[str],
-        static_inputs: dict[str, Any],
+        static_inputs: dict[tuple[str, ...], Any],
         non_diff_result_holder: list[Any],
         *tensors: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
@@ -274,7 +278,7 @@ class _TesseractFunction(torch.autograd.Function):
         # transforms the tensors arrive storage-less and it raises a documented
         # RuntimeError. Keep it ahead of anything that reads the holder, which
         # is unpopulated on that path and would surface a bare IndexError first.
-        saved_inputs: dict[str, Any] = dict(static_inputs)
+        saved_inputs: dict[tuple[str, ...], Any] = dict(static_inputs)
         for path, tensor in zip(diff_input_paths, tensors, strict=True):
             saved_inputs[path] = _tensor_to_numpy(tensor)
         ctx.saved_inputs = saved_inputs
@@ -401,10 +405,10 @@ def apply_tesseract(
     # Partition into differentiable tensors vs static values. A declared path
     # may be a template, so match rather than compare: ``params.{}`` covers the
     # concrete leaf ``params.p`` and is addressed on the wire as ``params.{p}``.
-    diff_paths: list[str] = []
+    diff_paths: list[tuple[str, ...]] = []
     diff_wires: list[str] = []
     diff_tensors: list[torch.Tensor] = []
-    static: dict[str, Any] = {}
+    static: dict[tuple[str, ...], Any] = {}
 
     for path, value in flat_inputs:
         wire = (

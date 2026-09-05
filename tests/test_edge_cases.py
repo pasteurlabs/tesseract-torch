@@ -423,12 +423,9 @@ class TestFlattenEdgePaths:
         from tesseract_torch.function import _flatten_pytree
 
         tree = {"a": 1, "empty": {}, "nested": {"b": 2}}
-        assert dict(_flatten_pytree(tree)) == {"a": 1, "empty": {}, "nested.b": 2}
-        assert dict(_flatten_pytree(tree, recurse_into={"nested.b"})) == {
-            "a": 1,
-            "empty": {},
-            "nested.b": 2,
-        }
+        expected = {("a",): 1, ("empty",): {}, ("nested", "b"): 2}
+        assert dict(_flatten_pytree(tree)) == expected
+        assert dict(_flatten_pytree(tree, recurse_into={"nested.b"})) == expected
 
 
 class TestPartialForwardTangents:
@@ -454,3 +451,84 @@ class TestPartialForwardTangents:
             tangent = fwAD.unpack_dual(out).tangent
 
         torch.testing.assert_close(tangent, expected * tangent_in)
+
+
+try:  # tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707
+    from tesseract_core.runtime.tree_transforms import split_path  # noqa: F401
+
+    _CORE_ACCEPTS_WIDE_KEYS = True
+except ImportError:  # pragma: no cover
+    _CORE_ACCEPTS_WIDE_KEYS = False
+
+_needs_wide_keys = pytest.mark.skipif(
+    not _CORE_ACCEPTS_WIDE_KEYS,
+    reason="runtime rejects these keys until tesseract-core#707 is released",
+)
+
+
+class TestPathHelpers:
+    """The path helpers, which decide where a key ends, exercised directly.
+
+    These need no runtime, so they cover the dotted-key handling on every
+    tesseract-core version, including ones that reject such keys on the wire.
+    """
+
+    def test_a_dotted_key_is_one_segment(self):
+        from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
+
+        flat = _flatten_pytree(
+            {"params": {"layer.0.weight": 1}}, recurse_into={"params.{}"}
+        )
+        assert flat == [(("params", "layer.0.weight"), 1)]
+        # The key survives the round trip rather than becoming nested dicts.
+        assert _unflatten_pytree(dict(flat)) == {"params": {"layer.0.weight": 1}}
+
+    def test_wire_name_puts_the_whole_key_in_the_braces(self):
+        from tesseract_torch.function import _wire_name
+
+        assert _wire_name(("params", "layer.0.weight"), {"params.{}"}) == (
+            "params.{layer.0.weight}"
+        )
+        assert _wire_name(("x",), {"x"}) == "x"
+        assert _wire_name(("nope",), {"params.{}"}) is None
+
+    @pytest.mark.parametrize(
+        "path,value,known,expected",
+        [
+            # An empty dict carries no leaves, so there is nothing to recurse into.
+            (("a",), {}, {"a.b"}, False),
+            # No declared paths means recurse everywhere.
+            (("a",), {"b": 1}, None, True),
+            (("a",), {"b": 1}, {"a.b"}, True),
+            (("a",), {"b": 1}, {"c.d"}, False),
+            # A path equal to a known leaf is not a *strict* prefix of it.
+            (("a", "b"), {"x": 1}, {"a.b"}, False),
+        ],
+    )
+    def test_should_recurse(self, path, value, known, expected):
+        from tesseract_torch.function import _should_recurse
+
+        assert _should_recurse(path, value, known) is expected
+
+
+class TestDottedDictKeys:
+    """A dict key is free to contain a dot, and the key is where the path ends."""
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "plain",
+            pytest.param("a/b", marks=_needs_wide_keys),
+            pytest.param("a:b", marks=_needs_wide_keys),
+            pytest.param("layer.0.weight", marks=_needs_wide_keys),
+        ],
+    )
+    def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
+        """Joining segments and splitting again drops the dotted key.
+
+        It never gets a wire name, so its tensor is never registered for
+        autograd and backward reports that nothing requires grad.
+        """
+        x = torch.ones(3, requires_grad=True)
+        apply_tesseract(dict_key_tess, {"params": {key: x}})["result"].sum().backward()
+        torch.testing.assert_close(x.grad, torch.full((3,), 2.0))
