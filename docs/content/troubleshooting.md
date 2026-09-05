@@ -10,7 +10,13 @@ RuntimeError: apply_tesseract does not support torch.func transforms (torch.func
   - Forward mode: torch.autograd.forward_ad (dual tensors)
 ```
 
-**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.vmap`) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one.
+`torch.func.vmap` reports the same limitation in PyTorch's own words:
+
+```
+RuntimeError: You tried to vmap over _TesseractFunction, but it does not have vmap support. Please override and implement the vmap staticmethod or set generate_vmap_rule=True.
+```
+
+**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. `torch.func.vmap` is refused a step earlier, by PyTorch itself, because the underlying `autograd.Function` defines no batching rule.
 
 **Fix.** Use PyTorch's standard autograd API, which `apply_tesseract` supports in both modes:
 
