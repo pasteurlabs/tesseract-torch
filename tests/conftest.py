@@ -43,3 +43,11 @@ def forwardonly_tess() -> Tesseract:
 def dict_tess() -> Tesseract:
     """Tesseract with dict-valued differentiable fields on both sides."""
     return Tesseract.from_tesseract_api(here / "dict_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="module")
+def dict_key_tess() -> Tesseract:
+    """Dict-valued differentiable field, for keys that are not plain words."""
+    return Tesseract.from_tesseract_api(
+        here / "dict_key_tesseract" / "tesseract_api.py"
+    )
