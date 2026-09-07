@@ -35,6 +35,7 @@ content/api
 :hidden:
 
 examples/simple/demo.ipynb
+examples/nested/demo.ipynb
 ```
 
 ```{toctree}
