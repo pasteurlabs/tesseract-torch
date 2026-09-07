@@ -255,6 +255,13 @@ class _TesseractFunction(torch.autograd.Function):
         outputs: tuple[torch.Tensor, ...],
     ) -> None:
         """Save forward-pass metadata for use in backward / jvp."""
+        # Do not materialise zero cotangents for outputs the loss never used:
+        # let those arrive as None in backward() so we can drop them from the
+        # VJP request entirely, rather than paying the Tesseract to compute a
+        # gradient it will multiply by zero. (A seam with several
+        # differentiable outputs otherwise runs one autograd.grad per output on
+        # every backward, even for outputs with no incoming gradient.)
+        ctx.set_materialize_grads(False)
         (
             tesseract,
             diff_input_paths,
@@ -286,18 +293,33 @@ class _TesseractFunction(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: Any,
-        *grad_outputs: torch.Tensor,
+        *grad_outputs: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, ...]:
         """Reverse-mode AD via the Tesseract's VJP endpoint."""
-        cotangent_vector = {
-            wire: _tensor_to_numpy(grad)
-            for wire, grad in zip(ctx.diff_output_wires, grad_outputs, strict=True)
-        }
+        # With set_materialize_grads(False) an output the loss did not use
+        # arrives as None. Request the VJP only for the outputs that carry an
+        # incoming cotangent, so a seam with several differentiable outputs is
+        # never asked to compute (and we never pay to transport) a gradient
+        # that would be multiplied by zero.
+        active_wires: list[str] = []
+        cotangent_vector: dict[str, Any] = {}
+        for wire, grad in zip(ctx.diff_output_wires, grad_outputs, strict=True):
+            if grad is None:
+                continue
+            active_wires.append(wire)
+            cotangent_vector[wire] = _tensor_to_numpy(grad)
+
+        # No output carried a cotangent: the Tesseract cannot contribute any
+        # input gradient, so skip the VJP call entirely and return None for
+        # every input.
+        if not active_wires:
+            n_inputs = len(ctx.diff_input_wires)
+            return (None,) * 7 + (None,) * n_inputs
 
         vjp_result = ctx.tesseract.vector_jacobian_product(
             inputs=_unflatten_pytree(ctx.saved_inputs),
             vjp_inputs=list(ctx.diff_input_wires),
-            vjp_outputs=list(ctx.diff_output_wires),
+            vjp_outputs=active_wires,
             cotangent_vector=cotangent_vector,
         )
 

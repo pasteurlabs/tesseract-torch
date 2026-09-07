@@ -67,13 +67,41 @@ def jacobian_vector_product(
     return out
 
 
+def _record_vjp_outputs(vjp_outputs: set[str]) -> None:
+    """Append the sorted ``vjp_outputs`` received, as JSON, to a record file.
+
+    Set via ``$NESTED_VJP_RECORD``. Lets a test assert that ``backward()``
+    requests a VJP for only the outputs a loss actually used.
+    """
+    import json
+    import os
+
+    path = os.environ.get("NESTED_VJP_RECORD")
+    if not path:
+        return
+    with open(path, "a") as fh:
+        fh.write(json.dumps(sorted(vjp_outputs)) + "\n")
+
+
 def vector_jacobian_product(
     inputs: InputSchema,
     vjp_inputs: set[str],
     vjp_outputs: set[str],
     cotangent_vector,
 ):
-    out = {dx: 0.0 for dx in vjp_inputs}
+    # The runtime requires a gradient for every requested input wire. An input
+    # not reachable from any REQUESTED output gets a correctly shaped zero, not
+    # a bare 0.0 scalar: the wrapper drops unused outputs from vjp_outputs, so
+    # e.g. a loss on scalars.a leaves vectors.v out and vectors.v's input
+    # gradient is a zero vector of v's shape. (The map is diagonal:
+    # scalars.a<-scalars.a, vectors.v<-vectors.v.)
+    import numpy as np
+
+    _record_vjp_outputs(vjp_outputs)
+
+    v_shape = np.asarray(inputs.vectors.v).shape
+    zeros = {"scalars.a": np.float32(0.0), "vectors.v": np.zeros(v_shape, np.float32)}
+    out = {dx: zeros[dx] for dx in vjp_inputs}
     if "scalars.a" in vjp_inputs and "scalars.a" in vjp_outputs:
         out["scalars.a"] = 10.0 * cotangent_vector["scalars.a"]
     if "vectors.v" in vjp_inputs and "vectors.v" in vjp_outputs:
