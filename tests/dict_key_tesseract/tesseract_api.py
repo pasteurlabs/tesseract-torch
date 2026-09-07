@@ -1,9 +1,12 @@
 # Copyright 2026 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dict-valued differentiable field whose keys are not plain words.
+"""A Tesseract with a dict-valued differentiable field.
 
-A state dict is the obvious thing to put in one, and its keys carry dots.
+The schema constrains the keys to nothing beyond ``str``, so a caller may use
+whichever ones it wants to exercise. Every gradient is the same fixed multiple
+of the cotangent, which puts a mispathed one in the value rather than only in
+the requested path.
 """
 
 from typing import Any

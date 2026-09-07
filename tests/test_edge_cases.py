@@ -8,8 +8,10 @@ Covers reported issues and scenarios that early testers are likely to encounter.
 
 import numpy as np
 import pytest
+import tesseract_core
 import torch
 import torch.autograd.forward_ad as fwAD
+from packaging.version import Version
 
 from tesseract_torch import apply_tesseract
 
@@ -453,16 +455,13 @@ class TestPartialForwardTangents:
         torch.testing.assert_close(tangent, expected * tangent_in)
 
 
-try:  # tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707
-    from tesseract_core.runtime.tree_transforms import split_path  # noqa: F401
-
-    _CORE_ACCEPTS_WIDE_KEYS = True
-except ImportError:  # pragma: no cover
-    _CORE_ACCEPTS_WIDE_KEYS = False
+# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
+# which landed after 1.12.0. Drop this guard once the minimum version is past it.
+_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
 
 _needs_wide_keys = pytest.mark.skipif(
     not _CORE_ACCEPTS_WIDE_KEYS,
-    reason="runtime rejects these keys until tesseract-core#707 is released",
+    reason=f"tesseract-core {tesseract_core.__version__} rejects these keys (needs > 1.12.0)",
 )
 
 
