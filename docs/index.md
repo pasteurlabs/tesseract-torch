@@ -25,6 +25,7 @@ Tesseract is a registered trademark of Pasteur Labs, Inc. and may not be used wi
 
 content/get-started
 content/handling-differentiability
+content/troubleshooting
 content/api
 ```
 
