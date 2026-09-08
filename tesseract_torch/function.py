@@ -319,10 +319,12 @@ class _TesseractFunction(torch.autograd.Function):
 
         # No output carried a cotangent: the Tesseract cannot contribute any
         # input gradient, so skip the VJP call entirely and return None for
-        # every input.
+        # every input. Autograd normally prunes a node whose outputs are all
+        # off the backward path before calling backward(), so this is a
+        # defensive guard rather than a path a normal .backward() reaches.
         if not active_wires:
-            n_inputs = len(ctx.diff_input_wires)
-            return (None,) * 7 + (None,) * n_inputs
+            # None for the seven non-tensor arguments, then one per input.
+            return (None,) * (7 + len(ctx.diff_input_wires))
 
         vjp_result = ctx.tesseract.vector_jacobian_product(
             inputs=_unflatten_pytree(ctx.saved_inputs),

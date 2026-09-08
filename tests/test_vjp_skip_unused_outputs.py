@@ -3,10 +3,6 @@
 
 """backward() must request a VJP only for the outputs a loss actually used.
 
-A seam with several differentiable outputs otherwise runs one gradient per
-output on every backward, even for outputs the loss never touched (their
-cotangent materialised to zero). With ``set_materialize_grads(False)`` the
-unused outputs arrive as None and the wrapper drops them from ``vjp_outputs``.
 The ``nested_tesseract`` fixture has two independent differentiable outputs
 (``scalars.a`` from ``scalars.a`` and ``vectors.v`` from ``vectors.v``, a
 diagonal map) and records the ``vjp_outputs`` its VJP receives, so we can
@@ -15,11 +11,13 @@ alongside.
 """
 
 import json
+import types
 
 import numpy as np
 import torch
 
 from tesseract_torch import apply_tesseract
+from tesseract_torch.function import _TesseractFunction
 
 
 def _records(path):
@@ -89,3 +87,28 @@ def test_backward_requests_both_when_both_used(nested_tess, tmp_path, monkeypatc
     )
     assert torch.allclose(a.grad, torch.tensor(10.0), atol=1e-4)
     assert torch.allclose(v.grad, 10.0 * torch.ones(3), atol=1e-4)
+
+
+def test_backward_with_no_cotangents_skips_vjp():
+    """No output carries a cotangent -> the VJP is skipped and every grad is None.
+
+    Autograd prunes a node whose outputs are all off the backward path before
+    calling backward(), so this guard is not reachable through a normal
+    .backward(); we drive it directly with all-None grad_outputs.
+    """
+
+    class _NoVJP:
+        def vector_jacobian_product(self, **kwargs):
+            raise AssertionError("VJP called despite no incoming cotangent")
+
+    ctx = types.SimpleNamespace(
+        tesseract=_NoVJP(),
+        diff_output_wires=["scalars.a", "vectors.v"],
+        diff_input_wires=["scalars.a", "vectors.v"],
+        saved_inputs={},
+    )
+
+    grad_inputs = _TesseractFunction.backward(ctx, None, None)
+
+    # Seven None for the non-tensor arguments, then one None per input wire.
+    assert grad_inputs == (None,) * (7 + len(ctx.diff_input_wires))
