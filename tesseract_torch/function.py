@@ -128,12 +128,6 @@ _DICT_WILDCARD = "{}"
 _LIST_WILDCARD = "[]"
 
 
-def _is_templated(path: str) -> bool:
-    """True when *path* carries a container wildcard segment."""
-    parts = path.split(".")
-    return _DICT_WILDCARD in parts or _LIST_WILDCARD in parts
-
-
 def _wire_name(concrete_parts: KeyType, templates: set[str]) -> str | None:
     """Map a concrete leaf path to the name the Tesseract expects.
 
