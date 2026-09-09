@@ -18,8 +18,10 @@ import torch
 from tesseract_core import Tesseract
 
 # A leaf's path, one entry per schema level. Kept as segments rather than a
-# dotted string because a dict key is free to contain a dot.
-type KeyType = tuple[str, ...]
+# dotted string because a dict key is free to contain a dot. An int segment is
+# a list position, which is what keeps it apart from a dict key that merely
+# looks like one: {"0": v} carries "0" here, [v] carries 0.
+type KeyType = tuple[str | int, ...]
 
 
 def _to_tensor(arr: Any) -> torch.Tensor:
@@ -72,40 +74,86 @@ def _flatten_pytree(
     *,
     recurse_into: set[str] | None = None,
 ) -> list[tuple[KeyType, Any]]:
-    """Flatten a nested dict into ``(path_parts, leaf_value)`` pairs.
+    """Flatten a nested container into ``(path_parts, leaf_value)`` pairs.
 
     The path stays a tuple of segments rather than a dotted string because a
     dict key is free to contain a dot, and joining loses where the key ends.
+    List entries contribute their position as an int.
 
-    Only recurses into sub-dicts whose path is a strict prefix of at least one
-    path in *recurse_into*.  All other dicts are treated as opaque leaf values
-    (e.g. ``dict[str, Array]`` schema fields).
+    Only recurses into sub-containers whose path is a strict prefix of at least
+    one path in *recurse_into*.  All others are treated as opaque leaf values
+    (e.g. a ``dict[str, Array]`` field the schema does not mark differentiable).
 
-    If *recurse_into* is ``None``, every nested dict is recursed into.
+    If *recurse_into* is ``None``, every nested container is recursed into.
     """
     items: list[tuple[KeyType, Any]] = []
     for key, value in tree.items():
         path = (*prefix, key)
-        if isinstance(value, dict) and _should_recurse(path, value, recurse_into):
-            items.extend(_flatten_pytree(value, path, recurse_into=recurse_into))
+        if _should_recurse(path, value, recurse_into):
+            items.extend(_flatten_children(value, path, recurse_into))
         else:
             items.append((path, value))
     return items
 
 
+def _children(value: Any) -> list[tuple[str | int, Any]] | None:
+    """Return a container's (segment, child) pairs, or None if it is a leaf."""
+    if isinstance(value, dict):
+        return list(value.items())
+    if isinstance(value, list | tuple) and not _is_tensor_like(value):
+        return list(enumerate(value))
+    return None
+
+
+def _is_tensor_like(value: Any) -> bool:
+    """True for things a schema means as one array rather than a container."""
+    return isinstance(value, torch.Tensor | np.ndarray)
+
+
+def _flatten_children(
+    value: Any, path: KeyType, recurse_into: set[str] | None
+) -> list[tuple[KeyType, Any]]:
+    children = _children(value)
+    if children is None:
+        return [(path, value)]
+    items: list[tuple[KeyType, Any]] = []
+    for key, child in children:
+        sub = (*path, key)
+        if _should_recurse(sub, child, recurse_into):
+            items.extend(_flatten_children(child, sub, recurse_into))
+        else:
+            items.append((sub, child))
+    return items
+
+
+def _segment_matches(template: str, segment: str | int) -> bool:
+    """True when a template segment covers a concrete one.
+
+    ``{}`` stands for any dict key and ``[]`` for any list position, so the
+    wildcard a segment is allowed to match depends on what the segment is.
+    """
+    if isinstance(segment, int):
+        return template == _LIST_WILDCARD
+    return template in (_DICT_WILDCARD, segment)
+
+
 def _should_recurse(
     path: KeyType,
-    value: dict,
+    value: Any,
     known_paths: set[str] | None,
 ) -> bool:
     """Return True when *path* is a strict prefix of a known leaf path."""
-    if not value:
+    children = _children(value)
+    if not children:
         return False
     if known_paths is None:
         return True
     depth = len(path)
     return any(
-        len(parts) > depth and tuple(parts[:depth]) == path
+        len(parts) > depth
+        and all(
+            _segment_matches(t, s) for t, s in zip(parts[:depth], path, strict=True)
+        )
         for parts in (known.split(".") for known in known_paths)
     )
 
@@ -140,8 +188,9 @@ def _wire_name(concrete_parts: KeyType, templates: set[str]) -> str | None:
     Returns ``None`` when no declared path covers it, which is how the caller
     tells a differentiable leaf from a static one.
     """
-    if ".".join(concrete_parts) in templates:
-        return ".".join(concrete_parts)
+    joined = ".".join(str(part) for part in concrete_parts)
+    if joined in templates:
+        return joined
 
     for template in templates:
         template_parts = template.split(".")
@@ -149,36 +198,17 @@ def _wire_name(concrete_parts: KeyType, templates: set[str]) -> str | None:
             continue
         resolved: list[str] = []
         for tpl, concrete in zip(template_parts, concrete_parts, strict=True):
-            if tpl == _DICT_WILDCARD:
+            if tpl == _DICT_WILDCARD and isinstance(concrete, str):
                 resolved.append("{" + concrete + "}")
-            elif tpl == _LIST_WILDCARD:
-                # Handled up front by _reject_list_wildcards; a list field is
-                # an opaque leaf here, so this branch is defensive only.
-                return None
+            elif tpl == _LIST_WILDCARD and isinstance(concrete, int):
+                resolved.append(f"[{concrete}]")
             elif tpl != concrete:
                 break
             else:
-                resolved.append(concrete)
+                resolved.append(str(concrete))
         else:
             return ".".join(resolved)
     return None
-
-
-def _reject_list_wildcards(templates: set[str], where: str) -> None:
-    """Raise a clear error for list-valued differentiable fields.
-
-    ``_flatten_pytree`` only descends into dicts, so a list field arrives as
-    one opaque leaf and its tensors are never registered for autograd. Left
-    alone that surfaces as "element 0 of tensors does not require grad", which
-    says nothing about the cause.
-    """
-    offenders = sorted(t for t in templates if _LIST_WILDCARD in t.split("."))
-    if offenders:
-        raise NotImplementedError(
-            f"List-valued differentiable {where} are not supported yet: "
-            f"{', '.join(offenders)}. Use a dict-valued field, or keep the "
-            f"list entries as separate schema fields."
-        )
 
 
 def _resolve_output_names(
@@ -199,14 +229,30 @@ def _resolve_output_names(
 
 
 def _unflatten_pytree(flat: dict[KeyType, Any]) -> dict[str, Any]:
-    """Reconstruct a nested dict from ``{path_parts: value}``."""
-    tree: dict[str, Any] = {}
+    """Reconstruct a nested container from ``{path_parts: value}``.
+
+    Segments are built into dicts first and the ones holding list positions are
+    turned back into lists afterwards. A schema will not accept a numeric-keyed
+    dict where it wants a list, and only a list position ever arrives as an int,
+    so this cannot mistake a dict key that looks like a number for one.
+    """
+    tree: dict[str | int, Any] = {}
     for parts, value in flat.items():
         node = tree
         for part in parts[:-1]:
             node = node.setdefault(part, {})
         node[parts[-1]] = value
-    return tree
+    return _relist(tree)
+
+
+def _relist(node: Any) -> Any:
+    """Turn every dict built from list positions back into a list."""
+    if not isinstance(node, dict):
+        return node
+    rebuilt = {key: _relist(value) for key, value in node.items()}
+    if rebuilt and all(isinstance(key, int) for key in rebuilt):
+        return [rebuilt[key] for key in sorted(rebuilt)]
+    return rebuilt
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +466,6 @@ def apply_tesseract(
     openapi = tesseract.openapi_schema
     diff_in_paths = _get_differentiable_arrays(openapi, "ApplyInputSchema")
     diff_out_paths = _get_differentiable_arrays(openapi, "ApplyOutputSchema")
-    _reject_list_wildcards(diff_in_paths, "inputs")
-    _reject_list_wildcards(diff_out_paths, "outputs")
     diff_out_templates = sorted(diff_out_paths)
 
     # All known dotted paths guide pytree flattening so we recurse into

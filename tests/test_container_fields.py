@@ -16,8 +16,8 @@ field comes back ``None``.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
+import torch.autograd.forward_ad as fwAD
 
 from tesseract_torch import apply_tesseract
 
@@ -66,36 +66,54 @@ def test_gradients_match_an_explicit_reference(dict_tess):
     np.testing.assert_allclose(p.grad.numpy(), np.full(3, 10.0), rtol=1e-6)
 
 
-def test_list_valued_differentiable_field_is_rejected_loudly(tmp_path):
-    """A list field cannot be supported yet, so say so rather than detach it.
+class TestListValuedFields:
+    """A list-valued differentiable field is differentiated per position.
 
-    ``_flatten_pytree`` only descends into dicts, so a list field arrives as a
-    single opaque leaf and its tensors never register for autograd. Without
-    this guard that surfaces as "element 0 of tensors does not require grad".
+    The fixture weighs entry 0 by 2 and entry 1 by 5, so a gradient delivered
+    to the wrong position is visible in the value and not only in the path.
     """
-    from tesseract_core import Tesseract
 
-    api = tmp_path / "tesseract_api.py"
-    api.write_text(
-        "from typing import Any\n"
-        "import numpy as np\n"
-        "from pydantic import BaseModel\n"
-        "from tesseract_core.runtime import Array, Differentiable, Float32\n"
-        "class InputSchema(BaseModel):\n"
-        "    items: list[Differentiable[Array[(3,), Float32]]]\n"
-        "class OutputSchema(BaseModel):\n"
-        "    y: Differentiable[Array[(3,), Float32]]\n"
-        "def apply(inputs: InputSchema) -> OutputSchema:\n"
-        "    d = inputs.model_dump()\n"
-        "    return {'y': np.asarray(d['items'][0]) + np.asarray(d['items'][1])}\n"
-        "def abstract_eval(abstract_inputs: Any) -> dict:\n"
-        "    return {'y': {'shape': (3,), 'dtype': 'float32'}}\n"
-    )
-    (tmp_path / "tesseract_config.yaml").write_text(
-        'name: listwild\nversion: "0.1.0"\n'
-    )
+    def test_forward_sums_the_weighted_entries(self, list_tess):
+        out = apply_tesseract(list_tess, {"xs": [torch.ones(3), torch.ones(3)]})
+        np.testing.assert_allclose(out["total"].detach().numpy(), np.full(3, 7.0))
 
-    tess = Tesseract.from_tesseract_api(api)
-    items = [torch.ones(3, requires_grad=True) for _ in range(2)]
-    with pytest.raises(NotImplementedError, match="List-valued differentiable"):
-        apply_tesseract(tess, {"items": items})
+    def test_each_position_gets_its_own_gradient(self, list_tess):
+        xs = [torch.ones(3, requires_grad=True) for _ in range(2)]
+        apply_tesseract(list_tess, {"xs": xs})["total"].sum().backward()
+        np.testing.assert_allclose(xs[0].grad.numpy(), np.full(3, 2.0))
+        np.testing.assert_allclose(xs[1].grad.numpy(), np.full(3, 5.0))
+
+    def test_a_static_entry_stays_static(self, list_tess):
+        grad_entry = torch.ones(3, requires_grad=True)
+        static = torch.ones(3)
+        apply_tesseract(list_tess, {"xs": [grad_entry, static]})[
+            "total"
+        ].sum().backward()
+        np.testing.assert_allclose(grad_entry.grad.numpy(), np.full(3, 2.0))
+        assert static.grad is None
+
+    def test_forward_mode_through_a_position(self, list_tess):
+        with fwAD.dual_level():
+            seeded = fwAD.make_dual(torch.ones(3), torch.ones(3))
+            out = apply_tesseract(list_tess, {"xs": [seeded, torch.ones(3)]})
+            _, tangent = fwAD.unpack_dual(out["total"])
+        np.testing.assert_allclose(tangent.numpy(), np.full(3, 2.0))
+
+
+def test_a_numeric_dict_key_is_not_a_list_position():
+    """``{"0": v}`` and ``[v]`` must not collapse into each other.
+
+    Positions arrive as ints and dict keys as strings, which is what lets the
+    rebuild tell a list from a dict whose keys happen to look like numbers.
+    """
+    from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
+
+    as_dict = {"params": {"0": torch.ones(2), "1": torch.zeros(2)}}
+    flat = dict(_flatten_pytree(as_dict, recurse_into={"params.{}"}))
+    assert set(flat) == {("params", "0"), ("params", "1")}
+    assert isinstance(_unflatten_pytree(flat)["params"], dict)
+
+    as_list = {"xs": [torch.ones(2), torch.zeros(2)]}
+    flat = dict(_flatten_pytree(as_list, recurse_into={"xs.[]"}))
+    assert set(flat) == {("xs", 0), ("xs", 1)}
+    assert isinstance(_unflatten_pytree(flat)["xs"], list)
