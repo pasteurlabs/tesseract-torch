@@ -46,6 +46,12 @@ def dict_tess() -> Tesseract:
 
 
 @pytest.fixture(scope="module")
+def list_tess() -> Tesseract:
+    """List-valued differentiable field, one coefficient per position."""
+    return Tesseract.from_tesseract_api(here / "list_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="module")
 def dict_key_tess() -> Tesseract:
     """Dict-valued differentiable field, for keys that are not plain words."""
     return Tesseract.from_tesseract_api(
