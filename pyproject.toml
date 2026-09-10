@@ -31,6 +31,7 @@ dev = [
     "pytest",
     "pytest-benchmark",
     "pytest-cov",
+    "pytest-timeout",
     "typeguard",
     "requests",
     "tesseract-core[runtime]",
