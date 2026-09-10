@@ -16,10 +16,16 @@ field comes back ``None``.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 import torch.autograd.forward_ad as fwAD
 
 from tesseract_torch import apply_tesseract
+
+
+def COEFF(index: int) -> float:
+    """Mirrors ``coefficient`` in the list fixture: distinct weight per entry."""
+    return 2.0 + index
 
 
 def _inputs() -> tuple[torch.Tensor, torch.Tensor]:
@@ -69,19 +75,21 @@ def test_gradients_match_an_explicit_reference(dict_tess):
 class TestListValuedFields:
     """A list-valued differentiable field is differentiated per position.
 
-    The fixture weighs entry 0 by 2 and entry 1 by 5, so a gradient delivered
-    to the wrong position is visible in the value and not only in the path.
+    The fixture weighs entry i by ``coefficient(i)``, distinct per position, so
+    a gradient delivered to the wrong one is visible in the value and not only
+    in the path.
     """
 
     def test_forward_sums_the_weighted_entries(self, list_tess):
         out = apply_tesseract(list_tess, {"xs": [torch.ones(3), torch.ones(3)]})
-        np.testing.assert_allclose(out["total"].detach().numpy(), np.full(3, 7.0))
+        expected = COEFF(0) + COEFF(1)
+        np.testing.assert_allclose(out["total"].detach().numpy(), np.full(3, expected))
 
     def test_each_position_gets_its_own_gradient(self, list_tess):
         xs = [torch.ones(3, requires_grad=True) for _ in range(2)]
         apply_tesseract(list_tess, {"xs": xs})["total"].sum().backward()
-        np.testing.assert_allclose(xs[0].grad.numpy(), np.full(3, 2.0))
-        np.testing.assert_allclose(xs[1].grad.numpy(), np.full(3, 5.0))
+        for i, x in enumerate(xs):
+            np.testing.assert_allclose(x.grad.numpy(), np.full(3, COEFF(i)))
 
     def test_a_static_entry_stays_static(self, list_tess):
         grad_entry = torch.ones(3, requires_grad=True)
@@ -89,15 +97,27 @@ class TestListValuedFields:
         apply_tesseract(list_tess, {"xs": [grad_entry, static]})[
             "total"
         ].sum().backward()
-        np.testing.assert_allclose(grad_entry.grad.numpy(), np.full(3, 2.0))
+        np.testing.assert_allclose(grad_entry.grad.numpy(), np.full(3, COEFF(0)))
         assert static.grad is None
 
-    def test_forward_mode_through_a_position(self, list_tess):
+    @pytest.mark.parametrize("grad_at", [(1,), (3,), (1, 3), (0, 2, 3)])
+    def test_gradients_land_on_the_right_positions(self, list_tess, grad_at):
+        """Differentiated entries need not be first, or contiguous, or alone."""
+        xs = [torch.full((3,), float(i), requires_grad=i in grad_at) for i in range(4)]
+        apply_tesseract(list_tess, {"xs": xs})["total"].sum().backward()
+        for i, x in enumerate(xs):
+            if i in grad_at:
+                np.testing.assert_allclose(x.grad.numpy(), np.full(3, COEFF(i)))
+            else:
+                assert x.grad is None, f"entry {i} is static and must stay so"
+
+    def test_forward_mode_through_a_later_position(self, list_tess):
         with fwAD.dual_level():
-            seeded = fwAD.make_dual(torch.ones(3), torch.ones(3))
-            out = apply_tesseract(list_tess, {"xs": [seeded, torch.ones(3)]})
+            xs = [torch.ones(3) for _ in range(4)]
+            xs[2] = fwAD.make_dual(xs[2], torch.ones(3))
+            out = apply_tesseract(list_tess, {"xs": xs})
             _, tangent = fwAD.unpack_dual(out["total"])
-        np.testing.assert_allclose(tangent.numpy(), np.full(3, 2.0))
+        np.testing.assert_allclose(tangent.numpy(), np.full(3, COEFF(2)))
 
 
 def test_a_numeric_dict_key_is_not_a_list_position():

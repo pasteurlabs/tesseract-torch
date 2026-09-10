@@ -69,7 +69,7 @@ def _get_differentiable_arrays(
 
 
 def _flatten_pytree(
-    tree: dict[str, Any],
+    tree: Any,
     prefix: KeyType = (),
     *,
     recurse_into: set[str] | None = None,
@@ -78,59 +78,45 @@ def _flatten_pytree(
 
     The path stays a tuple of segments rather than a dotted string because a
     dict key is free to contain a dot, and joining loses where the key ends.
-    List entries contribute their position as an int.
+    A list entry contributes its position as an int.
 
-    Only recurses into sub-containers whose path is a strict prefix of at least
-    one path in *recurse_into*.  All others are treated as opaque leaf values
-    (e.g. a ``dict[str, Array]`` field the schema does not mark differentiable).
-
-    If *recurse_into* is ``None``, every nested container is recursed into.
+    Only recurses into sub-containers a path in *recurse_into* reaches past.
+    Everything else is a leaf, which is how a container the schema does not
+    mark differentiable stays whole. ``None`` recurses everywhere.
     """
+    children = _children(tree)
+    if children is None:
+        return [(prefix, tree)]
     items: list[tuple[KeyType, Any]] = []
-    for key, value in tree.items():
+    for key, child in children:
         path = (*prefix, key)
-        if _should_recurse(path, value, recurse_into):
-            items.extend(_flatten_children(value, path, recurse_into))
+        if _should_recurse(path, child, recurse_into):
+            items.extend(_flatten_pytree(child, path, recurse_into=recurse_into))
         else:
-            items.append((path, value))
+            items.append((path, child))
     return items
 
 
 def _children(value: Any) -> list[tuple[str | int, Any]] | None:
-    """Return a container's (segment, child) pairs, or None if it is a leaf."""
+    """A container's (segment, child) pairs, or None if it is a leaf.
+
+    An array is a leaf however sequence-like it looks, since the schema means
+    it as one value rather than a list of them.
+    """
     if isinstance(value, dict):
         return list(value.items())
-    if isinstance(value, list | tuple) and not _is_tensor_like(value):
+    if isinstance(value, torch.Tensor | np.ndarray):
+        return None
+    if isinstance(value, list | tuple):
         return list(enumerate(value))
     return None
-
-
-def _is_tensor_like(value: Any) -> bool:
-    """True for things a schema means as one array rather than a container."""
-    return isinstance(value, torch.Tensor | np.ndarray)
-
-
-def _flatten_children(
-    value: Any, path: KeyType, recurse_into: set[str] | None
-) -> list[tuple[KeyType, Any]]:
-    children = _children(value)
-    if children is None:
-        return [(path, value)]
-    items: list[tuple[KeyType, Any]] = []
-    for key, child in children:
-        sub = (*path, key)
-        if _should_recurse(sub, child, recurse_into):
-            items.extend(_flatten_children(child, sub, recurse_into))
-        else:
-            items.append((sub, child))
-    return items
 
 
 def _segment_matches(template: str, segment: str | int) -> bool:
     """True when a template segment covers a concrete one.
 
-    ``{}`` stands for any dict key and ``[]`` for any list position, so the
-    wildcard a segment is allowed to match depends on what the segment is.
+    ``{}`` stands for any dict key and ``[]`` for any list position, so which
+    wildcard applies depends on what the segment is.
     """
     if isinstance(segment, int):
         return template == _LIST_WILDCARD
@@ -142,20 +128,23 @@ def _should_recurse(
     value: Any,
     known_paths: set[str] | None,
 ) -> bool:
-    """Return True when *path* is a strict prefix of a known leaf path."""
-    children = _children(value)
-    if not children:
+    """True when some declared path reaches past *path* into this container.
+
+    A container is only worth opening if a leaf is declared below it, and the
+    path so far has to match that declaration segment by segment. An empty one
+    holds nothing to reach, so it stays a leaf.
+    """
+    if not _children(value):
         return False
     if known_paths is None:
         return True
-    depth = len(path)
-    return any(
-        len(parts) > depth
-        and all(
-            _segment_matches(t, s) for t, s in zip(parts[:depth], path, strict=True)
-        )
-        for parts in (known.split(".") for known in known_paths)
-    )
+    for known in known_paths:
+        declared = known.split(".")
+        if len(declared) <= len(path):
+            continue
+        if all(_segment_matches(t, s) for t, s in zip(declared, path, strict=False)):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

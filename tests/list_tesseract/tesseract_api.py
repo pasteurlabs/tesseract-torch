@@ -3,8 +3,9 @@
 
 """A Tesseract with a list-valued differentiable field.
 
-Each entry gets its own coefficient, so a gradient routed to the wrong
-position shows up in the value rather than only in the requested path.
+Entry i is weighed by ``coefficient(i)``, distinct per position and defined
+for any length, so a gradient delivered to the wrong position shows up in the
+value rather than only in the requested path.
 """
 
 from typing import Any
@@ -13,7 +14,15 @@ import numpy as np
 from pydantic import BaseModel
 from tesseract_core.runtime import Array, Differentiable, Float32
 
-COEFFS = (2.0, 5.0)
+
+def coefficient(index: int) -> float:
+    """Weight of the entry at *index*."""
+    return 2.0 + index
+
+
+def _index_of(path: str) -> int:
+    """Position addressed by a wire path such as ``xs.[2]``."""
+    return int(path.removeprefix("xs.[").removesuffix("]"))
 
 
 class InputSchema(BaseModel):
@@ -26,7 +35,7 @@ class OutputSchema(BaseModel):
 
 def apply(inputs: InputSchema) -> OutputSchema:
     xs = inputs.model_dump()["xs"]
-    total = sum(c * np.asarray(x, np.float32) for c, x in zip(COEFFS, xs, strict=True))
+    total = sum(coefficient(i) * np.asarray(x, np.float32) for i, x in enumerate(xs))
     return {"total": total}
 
 
@@ -37,11 +46,7 @@ def vector_jacobian_product(
     cotangent_vector: dict[str, Any],
 ) -> dict[str, Any]:
     ct = np.asarray(cotangent_vector["total"], np.float32)
-    out = {}
-    for path in vjp_inputs:
-        idx = int(path.removeprefix("xs.[").removesuffix("]"))
-        out[path] = COEFFS[idx] * ct
-    return out
+    return {path: coefficient(_index_of(path)) * ct for path in vjp_inputs}
 
 
 def jacobian_vector_product(
@@ -52,8 +57,7 @@ def jacobian_vector_product(
 ) -> dict[str, Any]:
     total = np.zeros(3, np.float32)
     for path, tangent in tangent_vector.items():
-        idx = int(path.removeprefix("xs.[").removesuffix("]"))
-        total = total + COEFFS[idx] * np.asarray(tangent, np.float32)
+        total = total + coefficient(_index_of(path)) * np.asarray(tangent, np.float32)
     return {"total": total}
 
 
