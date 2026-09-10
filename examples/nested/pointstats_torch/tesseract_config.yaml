@@ -1,0 +1,7 @@
+name: pointstats_torch
+version: "0.1.0"
+description: |
+  Tesseract that summarizes a weighted point cloud by its barycenter and radius of gyration. Uses PyTorch internally.
+
+build_config:
+  target_platform: "native"
