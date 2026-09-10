@@ -70,7 +70,7 @@ def test_to_tensor_readonly_numpy_array():
 
 
 def test_to_tensor_tensor_passthrough():
-    """Already-a-tensor inputs (e.g. the JVP no-tangent shortcut) pass through."""
+    """An input that is already a tensor passes through untouched."""
     t = torch.tensor([1.0, 2.0])
     assert _to_tensor(t) is t
 
@@ -243,9 +243,9 @@ def test_cuda_ipc_flag_is_noop_for_local_client(vectoradd_tess):
     """``cuda_ipc=True`` against a LocalClient must behave exactly as without it.
 
     tests/vectoradd_tesseract is loaded via ``from_tesseract_api``, i.e. an
-    in-process LocalClient that already shares memory -- ``_cuda_ipc_mode``
-    is a no-op for it (see test_cuda_ipc_mode_noop_for_local_client), so this
-    just confirms the flag doesn't break the ordinary CPU path.
+    in-process LocalClient that already shares memory. ``_supports_cuda_ipc``
+    is False for it, so the flag resolves to inactive; this just confirms it
+    doesn't break the ordinary CPU path.
     """
     a = torch.tensor([1.0, 2.0, 3.0])
     b = np.array([4.0, 5.0, 6.0], dtype=np.float32)

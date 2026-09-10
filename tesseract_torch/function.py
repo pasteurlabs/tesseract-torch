@@ -72,10 +72,10 @@ def _cuda_ipc_mode(tesseract: Tesseract) -> Generator[None]:
 def _to_tensor(arr: Any) -> torch.Tensor:
     """Convert a decoded Tesseract array to a tensor, copying if read-only.
 
-    ``arr`` is a NumPy array (host encodings), an ``IpcDeviceArray``
+    ``arr`` is a NumPy array (host encodings) or an ``IpcDeviceArray``
     (``cuda_ipc`` encoding, a fresh device buffer owned by this process,
-    adopted zero-copy via DLPack), or already a ``torch.Tensor`` (a saved
-    CUDA input echoed back untouched, e.g. the JVP no-tangent shortcut).
+    adopted zero-copy via DLPack). A ``torch.Tensor`` is passed through
+    untouched, should an endpoint ever echo one back verbatim.
 
     The DLPack branch is gated on ``__cuda_array_interface__`` rather than
     ``__dlpack__`` alone: plain ``np.ndarray`` also implements ``__dlpack__``
