@@ -11,11 +11,14 @@ forward-mode JVP to ``tesseract.jacobian_vector_product()``.
 
 from __future__ import annotations
 
-from typing import Any
+import contextlib
+from collections.abc import Generator
+from typing import Any, get_args
 
 import numpy as np
 import torch
 from tesseract_core import Tesseract
+from tesseract_core.runtime.config import gpu_transport_type
 
 # A leaf's path, one entry per schema level. Kept as segments rather than a
 # dotted string because a dict key is free to contain a dot. An int segment is
@@ -24,23 +27,128 @@ from tesseract_core import Tesseract
 type KeyType = tuple[str | int, ...]
 
 
+# On-device transports the GPU path supports end-to-end, taken from
+# tesseract-core's own ``gpu_transport`` enum rather than hardcoded here so the
+# two can't drift. ``"none"`` is the config's way of saying "no transport"; we
+# spell that ``device_transport=None`` instead, so it is dropped from the set.
+_SUPPORTED_TRANSPORTS = frozenset(get_args(gpu_transport_type)) - {"none"}
+
+
+def _validate_device_transport(device_transport: str | None) -> None:
+    """Reject a device transport the GPU path cannot drive end-to-end.
+
+    An unsupported name would otherwise route into the transport-specific path
+    and send an ``Accept`` the server has no backend for.
+    """
+    if device_transport is not None and device_transport not in _SUPPORTED_TRANSPORTS:
+        raise ValueError(
+            f"Unsupported device_transport {device_transport!r}; "
+            f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
+        )
+
+
+def _supports_device_transport(tesseract: Tesseract) -> bool:
+    """Whether ``tesseract``'s client can be switched to a device transport.
+
+    True only for an ``HTTPClient`` (has ``_gpu_transport``) -- e.g.
+    ``LocalClient`` already shares process memory and has no device-transport
+    concept, so a CUDA tensor handed to it raw would reach its in-process
+    endpoint code untouched and fail there instead of being exported by IPC
+    handle.
+    """
+    client = getattr(tesseract, "_client", None)
+    return client is not None and hasattr(client, "_gpu_transport")
+
+
+@contextlib.contextmanager
+def _device_transport_mode(
+    tesseract: Tesseract, device_transport: str
+) -> Generator[None]:
+    """Temporarily switch a served Tesseract's HTTP client to ``device_transport``.
+
+    Caller must check :func:`_supports_device_transport` first; this assumes it
+    does.
+
+    tesseract-core treats the GPU transport as an axis independent of the host
+    (CPU) array output format. ``_gpu_transport`` governs how CUDA *inputs* the
+    client sends are encoded (exported by IPC handle rather than host-copied).
+    The ``Accept`` header's ``gpu_transport`` media-type parameter asks the
+    served Tesseract to return CUDA *outputs* by IPC handle too. Both are set
+    here so a round trip stays on-device in both directions. The ``Accept`` media
+    type reuses the client's current ``_output_format`` so the CPU leaves of a
+    mixed response are unaffected.
+
+    Scoped to a single call so a Tesseract shared across CPU-tensor and
+    CUDA-tensor calls is not permanently switched over; mirrors
+    ``tesseract_jax.tesseract_compat.Jaxeract.device_transport_encoding``.
+    """
+    client = tesseract._client
+    session = getattr(client, "_session", None)
+    prev_transport = client._gpu_transport
+    had_accept = session is not None and "Accept" in session.headers
+    prev_accept = session.headers.get("Accept") if session is not None else None
+
+    output_format = getattr(client, "_output_format", "json+base64")
+
+    client._gpu_transport = device_transport
+    if session is not None:
+        session.headers["Accept"] = (
+            f"application/{output_format}; gpu_transport={device_transport}"
+        )
+    try:
+        yield
+    finally:
+        client._gpu_transport = prev_transport
+        if session is not None:
+            if had_accept:
+                session.headers["Accept"] = prev_accept
+            else:
+                session.headers.pop("Accept", None)
+
+
 def _to_tensor(arr: Any) -> torch.Tensor:
-    """Convert a numpy array to a float32 tensor, copying if read-only."""
+    """Convert a decoded Tesseract array to a tensor, copying if read-only.
+
+    ``arr`` is a NumPy array (host encodings) or an ``IpcDeviceArray``
+    (``cuda_ipc`` encoding, a fresh device buffer owned by this process,
+    adopted zero-copy via DLPack). A ``torch.Tensor`` is passed through
+    untouched, should an endpoint ever echo one back verbatim.
+
+    The DLPack branch is gated on ``__cuda_array_interface__`` rather than
+    ``__dlpack__`` alone: plain ``np.ndarray`` also implements ``__dlpack__``
+    (since NumPy 1.22), and routing a *read-only* one through it fails
+    (DLPack has no way to signal read-only to an older consumer), where the
+    ``np.asarray``/copy fallback below handles it correctly.
+    """
+    if isinstance(arr, torch.Tensor):
+        return arr
+    if hasattr(arr, "__cuda_array_interface__"):
+        return torch.utils.dlpack.from_dlpack(arr)
     a = np.asarray(arr)
     if not a.flags.writeable:
         a = a.copy()
     return torch.as_tensor(a)
 
 
-def _tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
-    """Convert a torch tensor to a numpy array, preserving dtype."""
-    # torch.func transforms (vjp, jvp, grad, vmap) wrap tensors in a C++
-    # FunctionalTensorWrapper that has no backing storage.  These tensors
-    # report type(t)==torch.Tensor (no Python subclass), so there is no
-    # isinstance check we can use.  Instead we probe data_ptr(), the same
-    # public precondition that .numpy() relies on, to raise an actionable
-    # error instead of the confusing default message ("Cannot access data
-    # pointer of Tensor that doesn't have storage").
+def _tensor_to_numpy_or_cuda(t: torch.Tensor, *, on_device: bool = False) -> Any:
+    """Convert a torch tensor to a numpy array, or pass a CUDA tensor through.
+
+    A CUDA tensor already exposes ``__cuda_array_interface__``, so when a device
+    transport is active for this call it can be handed to the Tesseract client
+    as-is and exported by IPC handle instead of copied to host. It must be
+    contiguous, since the transport moves a flat byte range with no strides.
+    Without a device transport, a CUDA tensor still needs the host copy below:
+    the client's default encoder calls ``np.asanyarray`` on it, which cannot
+    read GPU memory.
+
+    torch.func transforms (vjp, jvp, grad, vmap) wrap tensors in a C++
+    FunctionalTensorWrapper that has no backing storage.  These tensors
+    report type(t)==torch.Tensor (no Python subclass), so there is no
+    isinstance check we can use.  Instead we probe data_ptr(), the same
+    public precondition that .numpy() relies on, to raise an actionable
+    error instead of the confusing default message ("Cannot access data
+    pointer of Tensor that doesn't have storage").
+    """
     try:
         t.data_ptr()
     except RuntimeError:
@@ -51,6 +159,8 @@ def _tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
             "  - Reverse mode: result['y'].backward() or torch.autograd.grad()\n"
             "  - Forward mode: torch.autograd.forward_ad (dual tensors)"
         ) from None
+    if on_device and t.is_cuda:
+        return t.detach().contiguous()
     return t.detach().cpu().numpy()
 
 
@@ -257,6 +367,7 @@ class _TesseractFunction(torch.autograd.Function):
         diff_output_templates: list[str],
         all_paths: set[str],
         static_inputs: dict[KeyType, Any],
+        device_transport: str | None,
         non_diff_result_holder: list[Any],
         *tensors: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
@@ -270,11 +381,17 @@ class _TesseractFunction(torch.autograd.Function):
         differentiable output is declared as a template, and its concrete keys
         only exist once ``apply`` has returned.
         """
+        active = device_transport if _supports_device_transport(tesseract) else None
         flat_inputs = dict(static_inputs)
         for path, tensor in zip(diff_input_paths, tensors, strict=True):
-            flat_inputs[path] = _tensor_to_numpy(tensor)
+            flat_inputs[path] = _tensor_to_numpy_or_cuda(tensor, on_device=bool(active))
 
-        result = tesseract.apply(_unflatten_pytree(flat_inputs))
+        with (
+            _device_transport_mode(tesseract, active)
+            if active
+            else contextlib.nullcontext()
+        ):
+            result = tesseract.apply(_unflatten_pytree(flat_inputs))
         flat_result = dict(_flatten_pytree(result, recurse_into=all_paths))
 
         resolved_outputs = _resolve_output_names(flat_result, diff_output_templates)
@@ -306,6 +423,7 @@ class _TesseractFunction(torch.autograd.Function):
             diff_output_templates,  # noqa: RUF059
             all_paths,  # noqa: RUF059
             static_inputs,
+            device_transport,
             holder,
             *tensors,
         ) = inputs
@@ -313,6 +431,21 @@ class _TesseractFunction(torch.autograd.Function):
         ctx.diff_input_paths = diff_input_paths
         # Wire names address the endpoint; concrete paths rebuild the pytree.
         ctx.diff_input_wires = diff_input_wires
+        # Resolved once here (not the raw request value): a LocalClient can't
+        # act on a device transport, so backward()/jvp() must fall back to the
+        # host copy for it exactly as forward() did, not retry passing GPU memory
+        # to code that cannot read it. ``None`` means host round-trip.
+        ctx.device_transport = (
+            device_transport if _supports_device_transport(tesseract) else None
+        )
+
+        # Each input tensor's own device, in ctx.diff_input_wires order.
+        # Autograd requires the gradient backward() returns for an input to
+        # live on that same input's device, regardless of what device the
+        # Tesseract's VJP happens to compute/return on (e.g. always host on a
+        # host round-trip) -- backward() uses this to move each decoded gradient
+        # back before returning it.
+        ctx.diff_input_devices = [tensor.device for tensor in tensors]
 
         # This conversion is also the torch.func rejection guard: under those
         # transforms the tensors arrive storage-less and it raises a documented
@@ -320,7 +453,9 @@ class _TesseractFunction(torch.autograd.Function):
         # is unpopulated on that path and would surface a bare IndexError first.
         saved_inputs: dict[KeyType, Any] = dict(static_inputs)
         for path, tensor in zip(diff_input_paths, tensors, strict=True):
-            saved_inputs[path] = _tensor_to_numpy(tensor)
+            saved_inputs[path] = _tensor_to_numpy_or_cuda(
+                tensor, on_device=bool(ctx.device_transport)
+            )
         ctx.saved_inputs = saved_inputs
 
         # Output names are resolved in forward(), since a dict-valued output
@@ -344,7 +479,9 @@ class _TesseractFunction(torch.autograd.Function):
             if grad is None:
                 continue
             active_wires.append(wire)
-            cotangent_vector[wire] = _tensor_to_numpy(grad)
+            cotangent_vector[wire] = _tensor_to_numpy_or_cuda(
+                grad, on_device=bool(ctx.device_transport)
+            )
 
         # No output carried a cotangent: the Tesseract cannot contribute any
         # input gradient, so skip the VJP call entirely and return None for
@@ -352,24 +489,32 @@ class _TesseractFunction(torch.autograd.Function):
         # off the backward path before calling backward(), so this is a
         # defensive guard rather than a path a normal .backward() reaches.
         if not active_wires:
-            # None for the seven non-tensor arguments, then one per input.
-            return (None,) * (7 + len(ctx.diff_input_wires))
+            # None for the eight non-tensor arguments, then one per input.
+            return (None,) * (8 + len(ctx.diff_input_wires))
 
-        vjp_result = ctx.tesseract.vector_jacobian_product(
-            inputs=_unflatten_pytree(ctx.saved_inputs),
-            vjp_inputs=list(ctx.diff_input_wires),
-            vjp_outputs=active_wires,
-            cotangent_vector=cotangent_vector,
-        )
+        with (
+            _device_transport_mode(ctx.tesseract, ctx.device_transport)
+            if ctx.device_transport
+            else contextlib.nullcontext()
+        ):
+            vjp_result = ctx.tesseract.vector_jacobian_product(
+                inputs=_unflatten_pytree(ctx.saved_inputs),
+                vjp_inputs=list(ctx.diff_input_wires),
+                vjp_outputs=active_wires,
+                cotangent_vector=cotangent_vector,
+            )
 
         grad_inputs: list[torch.Tensor | None] = []
-        for wire in ctx.diff_input_wires:
+        for wire, device in zip(
+            ctx.diff_input_wires, ctx.diff_input_devices, strict=True
+        ):
             g = vjp_result.get(wire)
-            grad_inputs.append(_to_tensor(g) if g is not None else None)
+            grad_inputs.append(_to_tensor(g).to(device) if g is not None else None)
 
         # None for (tesseract, diff_input_paths, diff_input_wires,
-        #           diff_output_templates, all_paths, static_inputs, holder)
-        return (None, None, None, None, None, None, None, *grad_inputs)
+        #           diff_output_templates, all_paths, static_inputs,
+        #           device_transport, holder)
+        return (None, None, None, None, None, None, None, None, *grad_inputs)
 
     @staticmethod
     def jvp(
@@ -378,15 +523,17 @@ class _TesseractFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         """Forward-mode AD via the Tesseract's JVP endpoint."""
         # tangents: (tesseract, diff_input_paths, diff_input_wires,
-        #            diff_output_templates, all_paths, static_inputs, holder,
-        #            *tensor_tangents)
-        tensor_tangents = tangents[7:]
+        #            diff_output_templates, all_paths, static_inputs,
+        #            device_transport, holder, *tensor_tangents)
+        tensor_tangents = tangents[8:]
 
         tangent_vector: dict[str, Any] = {}
         jvp_inputs: list[str] = []
         for wire, t in zip(ctx.diff_input_wires, tensor_tangents, strict=True):
             if t is not None:
-                tangent_vector[wire] = _tensor_to_numpy(t)
+                tangent_vector[wire] = _tensor_to_numpy_or_cuda(
+                    t, on_device=bool(ctx.device_transport)
+                )
                 jvp_inputs.append(wire)
 
         # apply_tesseract only routes tensors on a differentiable path into the
@@ -394,12 +541,17 @@ class _TesseractFunction(torch.autograd.Function):
         # forward tangent. jvp_inputs is therefore never empty here.
         assert jvp_inputs, "jvp called with no forward tangents"
 
-        jvp_result = ctx.tesseract.jacobian_vector_product(
-            inputs=_unflatten_pytree(ctx.saved_inputs),
-            jvp_inputs=jvp_inputs,
-            jvp_outputs=list(ctx.diff_output_wires),
-            tangent_vector=tangent_vector,
-        )
+        with (
+            _device_transport_mode(ctx.tesseract, ctx.device_transport)
+            if ctx.device_transport
+            else contextlib.nullcontext()
+        ):
+            jvp_result = ctx.tesseract.jacobian_vector_product(
+                inputs=_unflatten_pytree(ctx.saved_inputs),
+                jvp_inputs=jvp_inputs,
+                jvp_outputs=list(ctx.diff_output_wires),
+                tangent_vector=tangent_vector,
+            )
 
         return tuple(_to_tensor(jvp_result[wire]) for wire in ctx.diff_output_wires)
 
@@ -412,6 +564,8 @@ class _TesseractFunction(torch.autograd.Function):
 def apply_tesseract(
     tesseract: Tesseract,
     inputs: dict[str, Any],
+    *,
+    device_transport: str | None = None,
 ) -> dict[str, Any]:
     """Call a Tesseract as a differentiable PyTorch operation.
 
@@ -427,6 +581,18 @@ def apply_tesseract(
         inputs: Nested dict matching the Tesseract's input schema.  Provide
             ``torch.Tensor`` for array fields you want gradients through,
             and plain Python / NumPy values for everything else.
+        device_transport: Name of the on-device transport used to exchange CUDA
+            tensors with the Tesseract instead of a host round-trip (currently
+            ``"cuda_ipc"``), so array data never leaves the device. Requires a
+            served Tesseract (``HTTPClient``) started with the matching
+            ``gpu_transport`` and GPU access (e.g. ``Tesseract.from_image(...,
+            gpus=["all"], gpu_transport="cuda_ipc")``); has no effect on CPU
+            tensors, plain NumPy inputs, or a local (in-process) client, which
+            already shares memory. For ``cuda_ipc`` both processes must share the
+            CUDA IPC namespace (Docker's ``--ipc=host``). When ``None`` (default),
+            CUDA tensors take the same host round-trip as CPU tensors. This is an
+            experimental tesseract-core feature; see
+            ``tesseract_core.runtime.cuda.ipc``.
 
     Returns:
         Nested dict matching the Tesseract's output schema, with
@@ -446,6 +612,8 @@ def apply_tesseract(
         })
         result["statistics"]["barycenter"].sum().backward()
     """
+    _validate_device_transport(device_transport)
+
     openapi = tesseract.openapi_schema
     diff_in_paths = _get_differentiable_arrays(openapi, "ApplyInputSchema")
     diff_out_paths = _get_differentiable_arrays(openapi, "ApplyOutputSchema")
@@ -456,6 +624,13 @@ def apply_tesseract(
     all_paths = diff_in_paths | diff_out_paths
 
     flat_inputs = _flatten_pytree(inputs, recurse_into=all_paths)
+
+    # Resolved once (not the raw request value): a LocalClient can't act on a
+    # device transport, so a CUDA tensor must still take the host round-trip for
+    # it. ``None`` means host round-trip.
+    active_transport = (
+        device_transport if _supports_device_transport(tesseract) else None
+    )
 
     # Partition into differentiable tensors vs static values. A declared path
     # may be a template, so match rather than compare: ``params.{}`` covers the
@@ -474,7 +649,9 @@ def apply_tesseract(
             diff_wires.append(wire)
             diff_tensors.append(value)
         elif isinstance(value, torch.Tensor):
-            static[path] = _tensor_to_numpy(value)
+            static[path] = _tensor_to_numpy_or_cuda(
+                value, on_device=bool(active_transport)
+            )
         else:
             static[path] = value
 
@@ -489,6 +666,7 @@ def apply_tesseract(
         diff_out_templates,
         all_paths,
         static,
+        device_transport,
         result_holder,
         *diff_tensors,
     )
