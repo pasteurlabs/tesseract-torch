@@ -70,6 +70,11 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
     "ignore::ImportWarning",
+    # torch>=2.14 calls torch.jit.script inside its own forward-mode (jvp)
+    # decomposition machinery, reached via torch.autograd.forward_ad.make_dual.
+    # Scoped to torch.jit (where the warning is raised) so real deprecations
+    # elsewhere still surface.
+    "ignore:`torch.jit.script` is deprecated:FutureWarning:torch.jit._script",
     # raised by Cython, usually harmless
     "ignore:numpy.dtype size changed",
     "ignore:numpy.ufunc size changed",

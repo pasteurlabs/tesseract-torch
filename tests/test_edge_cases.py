@@ -404,8 +404,8 @@ class TestCUDA:
         """CUDA tensors support backward pass, with the gradient on the same device.
 
         Regression test: the VJP result is decoded from the Tesseract's
-        response (always host memory here, since this call doesn't opt into
-        cuda_ipc), but autograd requires the gradient returned for a CUDA
+        response (always host memory here, since this call doesn't opt into a
+        device transport), but autograd requires the gradient returned for a CUDA
         input to itself be a CUDA tensor -- returning a CPU tensor raises
         "invalid gradient ... expected device cuda:0 but got cpu".
         """

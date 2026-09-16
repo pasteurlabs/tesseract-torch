@@ -163,8 +163,9 @@ def served_gpu_tesseract(tmp_path_factory):
         here / "gpu_tesseract" / "tesseract_api.py",
         name="gpu",
         extra_env={
-            # cuda_ipc output is an experimental opt-in in tesseract-core.
-            "TESSERACT_ENABLE_EXPERIMENTAL_CUDA_IPC": "1",
+            # Serve GPU arrays over the cuda_ipc transport (env form of the
+            # runtime's gpu_transport config).
+            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
         },
     )
     url = next(gen)
