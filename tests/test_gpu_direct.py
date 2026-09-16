@@ -36,18 +36,26 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
     )
 
 
-def test_apply_matches_default_host_path(served_gpu_tesseract):
-    """The cuda_ipc path must match the default (host-copy) path exactly."""
+def test_apply_matches_host_path(served_gpu_tesseract):
+    """The cuda_ipc path must match the host-copy path exactly.
+
+    The baseline pins ``device_transport=None`` (the host round-trip)
+    explicitly rather than relying on the call default, so the comparison
+    stays meaningful even if the default ever becomes a device transport --
+    otherwise it could silently end up comparing the cuda_ipc path to itself.
+    """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
 
     ipc = apply_tesseract(
         served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
     )["c"]
-    default = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
+    host = apply_tesseract(
+        served_gpu_tesseract, {"a": a, "b": b}, device_transport=None
+    )["c"]
 
     assert ipc.is_cuda
-    np.testing.assert_array_equal(ipc.cpu().numpy(), default.cpu().numpy())
+    np.testing.assert_array_equal(ipc.cpu().numpy(), host.cpu().numpy())
 
 
 def test_grad_through_cuda_ipc(served_gpu_tesseract):

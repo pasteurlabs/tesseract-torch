@@ -43,11 +43,6 @@ def _fake_tesseract(client: object | None) -> Tesseract:
     return tess
 
 
-# ---------------------------------------------------------------------------
-# _to_tensor: the DLPack decode gate must not swallow plain NumPy arrays
-# ---------------------------------------------------------------------------
-
-
 def test_to_tensor_numpy_roundtrip():
     a = np.array([1.0, 2.0, 3.0], dtype=np.float32)
     t = _to_tensor(a)
@@ -109,11 +104,6 @@ def test_to_tensor_adopts_cuda_array_interface_via_dlpack():
     assert torch.allclose(t, torch.tensor([9.0, 8.0]))
 
 
-# ---------------------------------------------------------------------------
-# _tensor_to_numpy_or_cuda: CPU tensors still go through NumPy
-# ---------------------------------------------------------------------------
-
-
 def test_tensor_to_numpy_or_cuda_cpu_tensor_returns_numpy():
     t = torch.tensor([1.0, 2.0, 3.0])
     out = _tensor_to_numpy_or_cuda(t)
@@ -165,11 +155,6 @@ def test_tensor_to_numpy_or_cuda_rejects_functional_tensors():
         func.grad(f)(torch.tensor(1.0))
 
 
-# ---------------------------------------------------------------------------
-# _validate_device_transport: reject names the GPU path can't drive
-# ---------------------------------------------------------------------------
-
-
 def test_validate_device_transport_accepts_cuda_ipc():
     _validate_device_transport("cuda_ipc")
 
@@ -195,11 +180,6 @@ def test_apply_tesseract_rejects_unsupported_transport(vectoradd_tess):
         apply_tesseract(vectoradd_tess, {"a": a, "b": b}, device_transport="nixl")
 
 
-# ---------------------------------------------------------------------------
-# _supports_device_transport: which clients a device transport can apply to
-# ---------------------------------------------------------------------------
-
-
 def _fake_http_client() -> HTTPClient:
     """A real ``HTTPClient`` that never talks to the network in these tests.
 
@@ -223,12 +203,6 @@ def test_supports_device_transport_false_for_local_client_shaped_object():
 def test_supports_device_transport_false_when_no_client():
     tess = _fake_tesseract(client=None)
     assert _supports_device_transport(tess) is False
-
-
-# ---------------------------------------------------------------------------
-# _device_transport_mode: the HTTPClient toggle itself (assumes the caller
-# already checked _supports_device_transport)
-# ---------------------------------------------------------------------------
 
 
 def test_device_transport_mode_toggles_and_restores_http_client():
@@ -291,11 +265,6 @@ def test_device_transport_mode_restores_on_exception():
     assert tess._client._session.headers["Accept"] == prior_accept
 
 
-# ---------------------------------------------------------------------------
-# apply_tesseract(..., device_transport=...): local client is a no-op
-# ---------------------------------------------------------------------------
-
-
 def test_device_transport_is_noop_for_local_client(vectoradd_tess):
     """``device_transport`` against a LocalClient must behave as without it.
 
@@ -310,11 +279,6 @@ def test_device_transport_is_noop_for_local_client(vectoradd_tess):
         vectoradd_tess, {"a": a, "b": b}, device_transport="cuda_ipc"
     )
     assert torch.allclose(result["c"], torch.tensor([5.0, 7.0, 9.0]))
-
-
-# ---------------------------------------------------------------------------
-# GPU tensor handling (real CUDA hardware, still a LocalClient)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.gpu

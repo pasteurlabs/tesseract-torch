@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Generator
-from typing import Any
+from typing import Any, get_args
 
 import numpy as np
 import torch
 from tesseract_core import Tesseract
+from tesseract_core.runtime.config import gpu_transport_type
 
 # A leaf's path, one entry per schema level. Kept as segments rather than a
 # dotted string because a dict key is free to contain a dot. An int segment is
@@ -26,9 +27,11 @@ from tesseract_core import Tesseract
 type KeyType = tuple[str | int, ...]
 
 
-# On-device transports the GPU path supports end-to-end. cuda_ipc is the only
-# one wired through today. Add names here as the path learns to drive them.
-_SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
+# On-device transports the GPU path supports end-to-end, taken from
+# tesseract-core's own ``gpu_transport`` enum rather than hardcoded here so the
+# two can't drift. ``"none"`` is the config's way of saying "no transport"; we
+# spell that ``device_transport=None`` instead, so it is dropped from the set.
+_SUPPORTED_TRANSPORTS = frozenset(get_args(gpu_transport_type)) - {"none"}
 
 
 def _validate_device_transport(device_transport: str | None) -> None:
