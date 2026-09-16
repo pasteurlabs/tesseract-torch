@@ -80,6 +80,9 @@ filterwarnings = [
     "ignore:numpy.ufunc size changed",
     # sometimes, dependencies leak resources
     "ignore:.*socket\\.socket.*:pytest.PytestUnraisableExceptionWarning",
+    # torch emits this from its own forward-AD machinery (fwAD.make_dual);
+    # the message varies ("is deprecated" / "is not supported in Python 3.14+")
+    "ignore:`torch\\.jit\\.script`:FutureWarning",
 ]
 
 [tool.coverage.run]
