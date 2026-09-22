@@ -110,5 +110,5 @@ def test_backward_with_no_cotangents_skips_vjp():
 
     grad_inputs = _TesseractFunction.backward(ctx, None, None)
 
-    # Seven None for the non-tensor arguments, then one None per input wire.
-    assert grad_inputs == (None,) * (7 + len(ctx.diff_input_wires))
+    # Eight None for the non-tensor arguments, then one None per input wire.
+    assert grad_inputs == (None,) * (8 + len(ctx.diff_input_wires))
