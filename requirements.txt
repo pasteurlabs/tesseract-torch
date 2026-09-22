@@ -34,7 +34,7 @@ mdurl==0.1.2
     # via markdown-it-py
 mpmath==1.3.0
     # via sympy
-networkx==3.6.1
+networkx==3.7
     # via torch
 numpy==2.5.3
     # via tesseract-core
