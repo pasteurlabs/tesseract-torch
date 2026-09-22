@@ -62,12 +62,14 @@ def _supports_device_transport(tesseract: Tesseract) -> bool:
 
 @contextlib.contextmanager
 def _device_transport_mode(
-    tesseract: Tesseract, device_transport: str
+    tesseract: Tesseract, device_transport: str | None
 ) -> Generator[None]:
     """Temporarily switch a served Tesseract's HTTP client to ``device_transport``.
 
-    Caller must check :func:`_supports_device_transport` first; this assumes it
-    does.
+    A falsy ``device_transport`` (no on-device transport requested) is a no-op,
+    so callers can wrap every call unconditionally. When a transport is
+    requested the caller must have checked :func:`_supports_device_transport`
+    first, which this assumes.
 
     tesseract-core treats the GPU transport as an axis independent of the host
     (CPU) array output format. ``_gpu_transport`` governs how CUDA *inputs* the
@@ -82,6 +84,10 @@ def _device_transport_mode(
     CUDA-tensor calls is not permanently switched over; mirrors
     ``tesseract_jax.tesseract_compat.Jaxeract.device_transport_encoding``.
     """
+    if not device_transport:
+        yield
+        return
+
     client = tesseract._client
     session = getattr(client, "_session", None)
     prev_transport = client._gpu_transport
@@ -386,11 +392,7 @@ class _TesseractFunction(torch.autograd.Function):
         for path, tensor in zip(diff_input_paths, tensors, strict=True):
             flat_inputs[path] = _tensor_to_numpy_or_cuda(tensor, on_device=bool(active))
 
-        with (
-            _device_transport_mode(tesseract, active)
-            if active
-            else contextlib.nullcontext()
-        ):
+        with _device_transport_mode(tesseract, active):
             result = tesseract.apply(_unflatten_pytree(flat_inputs))
         flat_result = dict(_flatten_pytree(result, recurse_into=all_paths))
 
@@ -492,11 +494,7 @@ class _TesseractFunction(torch.autograd.Function):
             # None for the eight non-tensor arguments, then one per input.
             return (None,) * (8 + len(ctx.diff_input_wires))
 
-        with (
-            _device_transport_mode(ctx.tesseract, ctx.device_transport)
-            if ctx.device_transport
-            else contextlib.nullcontext()
-        ):
+        with _device_transport_mode(ctx.tesseract, ctx.device_transport):
             vjp_result = ctx.tesseract.vector_jacobian_product(
                 inputs=_unflatten_pytree(ctx.saved_inputs),
                 vjp_inputs=list(ctx.diff_input_wires),
@@ -541,11 +539,7 @@ class _TesseractFunction(torch.autograd.Function):
         # forward tangent. jvp_inputs is therefore never empty here.
         assert jvp_inputs, "jvp called with no forward tangents"
 
-        with (
-            _device_transport_mode(ctx.tesseract, ctx.device_transport)
-            if ctx.device_transport
-            else contextlib.nullcontext()
-        ):
+        with _device_transport_mode(ctx.tesseract, ctx.device_transport):
             jvp_result = ctx.tesseract.jacobian_vector_product(
                 inputs=_unflatten_pytree(ctx.saved_inputs),
                 jvp_inputs=jvp_inputs,
