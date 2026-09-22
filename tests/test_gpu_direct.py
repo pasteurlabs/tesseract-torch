@@ -1,9 +1,9 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-direct dispatch tests: ``apply_tesseract(..., device_transport="cuda_ipc")`` end to end.
+"""GPU-direct dispatch tests: ``apply_tesseract(..., gpu_transport="cuda_ipc")`` end to end.
 
-With ``device_transport="cuda_ipc"``, a served (HTTP) Tesseract exchanges CUDA tensors via
+With ``gpu_transport="cuda_ipc"``, a served (HTTP) Tesseract exchanges CUDA tensors via
 CUDA IPC handles instead of a host round-trip, keeping data on the device.
 
 These require a real GPU and a served (subprocess) GPU Tesseract, since CUDA
@@ -27,7 +27,7 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
     a = torch.arange(n, dtype=torch.float32, device="cuda")
     b = torch.ones(n, dtype=torch.float32, device="cuda") * 3.0
     out = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
     )
     c = out["c"]
     assert c.is_cuda
@@ -39,7 +39,7 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
 def test_apply_matches_host_path(served_gpu_tesseract):
     """The cuda_ipc path must match the host-copy path exactly.
 
-    The baseline pins ``device_transport=None`` (the host round-trip)
+    The baseline pins ``gpu_transport=None`` (the host round-trip)
     explicitly rather than relying on the call default, so the comparison
     stays meaningful even if the default ever becomes a device transport --
     otherwise it could silently end up comparing the cuda_ipc path to itself.
@@ -48,11 +48,11 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
 
     ipc = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
     )["c"]
-    host = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, device_transport=None
-    )["c"]
+    host = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b}, gpu_transport=None)[
+        "c"
+    ]
 
     assert ipc.is_cuda
     np.testing.assert_array_equal(ipc.cpu().numpy(), host.cpu().numpy())
@@ -65,7 +65,7 @@ def test_grad_through_cuda_ipc(served_gpu_tesseract):
     b = torch.ones(n, dtype=torch.float32, device="cuda")
 
     out = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
     )
     out["c"].sum().backward()
 
@@ -90,7 +90,7 @@ def test_jvp_through_cuda_ipc(served_gpu_tesseract):
         out = apply_tesseract(
             served_gpu_tesseract,
             {"a": a_dual, "b": b_dual},
-            device_transport="cuda_ipc",
+            gpu_transport="cuda_ipc",
         )
         _primal, tangent = fwAD.unpack_dual(out["c"])
 
@@ -121,7 +121,7 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
         out = apply_tesseract(
             served_gpu_tesseract,
             {"a": a_dual, "b": b_dual},
-            device_transport="cuda_ipc",
+            gpu_transport="cuda_ipc",
         )
         _primal, tangent = fwAD.unpack_dual(out["c"])
 
@@ -146,7 +146,7 @@ def test_serial_reuse(served_gpu_tesseract):
         a = torch.full((512,), float(i), dtype=torch.float32, device="cuda")
         b = torch.full((512,), float(2 * i), dtype=torch.float32, device="cuda")
         out = apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
         )
         np.testing.assert_allclose(
             out["c"].cpu().numpy(),
@@ -171,7 +171,7 @@ def test_grad_with_nondiff_array_input(served_gpu_tesseract):
     out = apply_tesseract(
         served_gpu_tesseract,
         {"a": a, "b": b, "mask": mask},
-        device_transport="cuda_ipc",
+        gpu_transport="cuda_ipc",
     )
     out["c"].sum().backward()
 
