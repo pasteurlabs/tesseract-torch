@@ -16,6 +16,10 @@ All notable changes to this project will be documented in this file.
 - Keep dotted dict keys whole when matching schema templates (#50)
 - Skip VJP for outputs that were not requested (#53)
 
+### Refactor
+
+- [**breaking**] Rename device_transport parameter to gpu_transport (#64)
+
 ### Documentation
 
 - Add a troubleshooting page (#52)
