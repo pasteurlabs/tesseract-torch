@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Differentiate list-valued fields per position (#56)
+- Support device-to-device GPU interop (#42)
 
 ### Bug Fixes
 
