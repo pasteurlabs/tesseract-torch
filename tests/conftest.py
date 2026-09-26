@@ -35,6 +35,12 @@ def nonlinear_tess() -> Tesseract:
 
 
 @pytest.fixture(scope="module")
+def batched_tess() -> Tesseract:
+    """Like ``nonlinear_tess``, but every array field accepts a batch dimension."""
+    return Tesseract.from_tesseract_api(here / "batched_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="module")
 def nested_tess() -> Tesseract:
     """Load the nested-schema test Tesseract."""
     return Tesseract.from_tesseract_api(here / "nested_tesseract" / "tesseract_api.py")

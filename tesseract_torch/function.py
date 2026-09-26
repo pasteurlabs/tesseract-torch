@@ -12,7 +12,9 @@ forward-mode JVP to ``tesseract.jacobian_vector_product()``.
 from __future__ import annotations
 
 import contextlib
+import warnings
 from collections.abc import Generator
+from dataclasses import dataclass, field, replace
 from typing import Any, get_args
 
 import numpy as np
@@ -45,6 +47,24 @@ def _validate_gpu_transport(gpu_transport: str | None) -> None:
             f"Unsupported gpu_transport {gpu_transport!r}; "
             f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
         )
+
+
+_VMAP_METHODS = ("sequential", "expand_dims", "broadcast_all")
+
+
+def _validate_vmap_method(vmap_method: str | None, gpu_transport: str | None) -> None:
+    """Reject a batching strategy the ``torch.vmap`` rule does not implement.
+
+    The rule is not wired up to the on-device transports yet, so combining the
+    two options is rejected up front.
+    """
+    if vmap_method is not None and vmap_method not in _VMAP_METHODS:
+        raise ValueError(
+            f"Unsupported vmap_method {vmap_method!r}; "
+            f"supported: {list(_VMAP_METHODS)}."
+        )
+    if vmap_method is not None and gpu_transport is not None:
+        raise ValueError("vmap_method cannot be combined with gpu_transport yet.")
 
 
 def _supports_gpu_transport(tesseract: Tesseract) -> bool:
@@ -147,7 +167,7 @@ def _tensor_to_numpy_or_cuda(t: torch.Tensor, *, on_device: bool = False) -> Any
     the client's default encoder calls ``np.asanyarray`` on it, which cannot
     read GPU memory.
 
-    torch.func transforms (vjp, jvp, grad, vmap) wrap tensors in a C++
+    torch.func transforms (vjp, jvp, grad) wrap tensors in a C++
     FunctionalTensorWrapper that has no backing storage.  These tensors
     report type(t)==torch.Tensor (no Python subclass), so there is no
     isinstance check we can use.  Instead we probe data_ptr(), the same
@@ -211,6 +231,29 @@ def _flatten_pytree(
         else:
             items.append((path, child))
     return items
+
+
+def _holds_array(value: Any) -> bool:
+    """Whether a tensor or NumPy array sits anywhere inside *value*."""
+    if isinstance(value, torch.Tensor | np.ndarray):
+        return True
+    return any(_holds_array(child) for _, child in _children(value) or ())
+
+
+def _open_array_containers(path: KeyType, value: Any) -> list[tuple[KeyType, Any]]:
+    """Split a dict or list that holds arrays into its leaves.
+
+    A container the schema does not mark differentiable stays whole when
+    flattened, which would hide its arrays from ``torch.vmap``. Tuples and
+    containers without arrays are kept as they are.
+    """
+    if not isinstance(value, dict | list) or not _holds_array(value):
+        return [(path, value)]
+    return [
+        item
+        for key, child in _children(value)
+        for item in _open_array_containers((*path, key), child)
+    ]
 
 
 def _children(value: Any) -> list[tuple[str | int, Any]] | None:
@@ -359,6 +402,50 @@ def _relist(node: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _DispatchParams:
+    """Everything a Tesseract call needs besides its input tensors.
+
+    Bundled so the autograd function and its ``vmap`` rule take
+    ``(params, slot, *tensors)`` rather than a long positional list.
+
+    Attributes:
+        tesseract: The Tesseract to call.
+        tensor_paths: Input path of each tensor argument, the differentiable
+            ones first.
+        diff_input_wires: Wire name of each differentiable tensor argument.
+        diff_output_templates: Declared paths of the differentiable outputs.
+        all_paths: Every declared differentiable path, to guide flattening.
+        static_inputs: The input leaves that are not tensors.
+        gpu_transport: Requested on-device transport, or ``None``.
+        vmap_method: Batching strategy under ``torch.vmap``, or ``None``.
+    """
+
+    tesseract: Tesseract
+    tensor_paths: list[KeyType]
+    diff_input_wires: list[str]
+    diff_output_templates: list[str]
+    all_paths: set[str]
+    static_inputs: dict[KeyType, Any]
+    gpu_transport: str | None
+    vmap_method: str | None
+
+
+@dataclass
+class _ResultSlot:
+    """Where the autograd function leaves the full result for its caller.
+
+    An object rather than a list: ``torch.func`` transforms rebuild list
+    arguments on the way in, so an append to one never reaches the caller.
+
+    ``outputs`` pairs the path of each returned tensor with its wire name, or
+    ``None`` for a non-differentiable output batched under ``torch.vmap``.
+    """
+
+    flat_result: dict[KeyType, Any] = field(default_factory=dict)
+    outputs: list[tuple[KeyType, str | None]] = field(default_factory=list)
+
+
 class _TesseractFunction(torch.autograd.Function):
     """Low-level autograd function wrapping a Tesseract.
 
@@ -367,40 +454,37 @@ class _TesseractFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        tesseract: Tesseract,
-        diff_input_paths: list[KeyType],
-        diff_input_wires: list[str],
-        diff_output_templates: list[str],
-        all_paths: set[str],
-        static_inputs: dict[KeyType, Any],
-        gpu_transport: str | None,
-        non_diff_result_holder: list[Any],
+        params: _DispatchParams,
+        slot: _ResultSlot,
         *tensors: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         """Run the Tesseract forward pass, returning differentiable outputs.
 
         The full (flat) result dict and the resolved output names are stashed
-        in *non_diff_result_holder* so the caller can reconstruct
-        non-differentiable outputs without a second ``apply()`` call.
+        in *slot* so the caller can reconstruct non-differentiable outputs
+        without a second ``apply()`` call.
 
         Output names are resolved here rather than passed in: a dict-valued
         differentiable output is declared as a template, and its concrete keys
         only exist once ``apply`` has returned.
         """
-        active = gpu_transport if _supports_gpu_transport(tesseract) else None
-        flat_inputs = dict(static_inputs)
-        for path, tensor in zip(diff_input_paths, tensors, strict=True):
+        tesseract = params.tesseract
+        active = params.gpu_transport if _supports_gpu_transport(tesseract) else None
+        flat_inputs = dict(params.static_inputs)
+        for path, tensor in zip(params.tensor_paths, tensors, strict=True):
             flat_inputs[path] = _tensor_to_numpy_or_cuda(tensor, on_device=bool(active))
 
         with _gpu_transport_mode(tesseract, active):
             result = tesseract.apply(_unflatten_pytree(flat_inputs))
-        flat_result = dict(_flatten_pytree(result, recurse_into=all_paths))
+        flat_result = dict(_flatten_pytree(result, recurse_into=params.all_paths))
 
-        resolved_outputs = _resolve_output_names(flat_result, diff_output_templates)
+        resolved_outputs = _resolve_output_names(
+            flat_result, params.diff_output_templates
+        )
 
         # Stash full result + resolved output names for the caller
-        non_diff_result_holder.append(flat_result)
-        non_diff_result_holder.append(resolved_outputs)
+        slot.flat_result = flat_result
+        slot.outputs = resolved_outputs
 
         return tuple(_to_tensor(flat_result[c]) for c, _ in resolved_outputs)
 
@@ -418,28 +502,18 @@ class _TesseractFunction(torch.autograd.Function):
         # differentiable outputs otherwise runs one autograd.grad per output on
         # every backward, even for outputs with no incoming gradient.)
         ctx.set_materialize_grads(False)
-        (
-            tesseract,
-            diff_input_paths,
-            diff_input_wires,
-            diff_output_templates,  # noqa: RUF059
-            all_paths,  # noqa: RUF059
-            static_inputs,
-            gpu_transport,
-            holder,
-            *tensors,
-        ) = inputs
-        ctx.tesseract = tesseract
-        ctx.diff_input_paths = diff_input_paths
+        params, slot, *tensors = inputs
+        ctx.tesseract = params.tesseract
         # Wire names address the endpoint; concrete paths rebuild the pytree.
-        ctx.diff_input_wires = diff_input_wires
+        ctx.diff_input_wires = params.diff_input_wires
         # Resolved once here (not the raw request value): a LocalClient can't
         # act on a device transport, so backward()/jvp() must fall back to the
         # host copy for it exactly as forward() did, not retry passing GPU memory
         # to code that cannot read it. ``None`` means host round-trip.
         ctx.gpu_transport = (
-            gpu_transport if _supports_gpu_transport(tesseract) else None
+            params.gpu_transport if _supports_gpu_transport(params.tesseract) else None
         )
+        ctx.num_tensors = len(tensors)
 
         # Each input tensor's own device, in ctx.diff_input_wires order.
         # Autograd requires the gradient backward() returns for an input to
@@ -447,14 +521,12 @@ class _TesseractFunction(torch.autograd.Function):
         # Tesseract's VJP happens to compute/return on (e.g. always host on a
         # host round-trip) -- backward() uses this to move each decoded gradient
         # back before returning it.
-        ctx.diff_input_devices = [tensor.device for tensor in tensors]
+        ctx.diff_input_devices = [
+            tensor.device for tensor in tensors[: len(params.diff_input_wires)]
+        ]
 
-        # This conversion is also the torch.func rejection guard: under those
-        # transforms the tensors arrive storage-less and it raises a documented
-        # RuntimeError. Keep it ahead of anything that reads the holder, which
-        # is unpopulated on that path and would surface a bare IndexError first.
-        saved_inputs: dict[KeyType, Any] = dict(static_inputs)
-        for path, tensor in zip(diff_input_paths, tensors, strict=True):
+        saved_inputs: dict[KeyType, Any] = dict(params.static_inputs)
+        for path, tensor in zip(params.tensor_paths, tensors, strict=True):
             saved_inputs[path] = _tensor_to_numpy_or_cuda(
                 tensor, on_device=bool(ctx.gpu_transport)
             )
@@ -462,7 +534,7 @@ class _TesseractFunction(torch.autograd.Function):
 
         # Output names are resolved in forward(), since a dict-valued output
         # has no concrete keys until apply() has returned.
-        ctx.diff_output_wires = [wire for _, wire in holder[1]]
+        ctx.diff_output_wires = [wire for _, wire in slot.outputs]
 
     @staticmethod
     def backward(
@@ -491,8 +563,7 @@ class _TesseractFunction(torch.autograd.Function):
         # off the backward path before calling backward(), so this is a
         # defensive guard rather than a path a normal .backward() reaches.
         if not active_wires:
-            # None for the eight non-tensor arguments, then one per input.
-            return (None,) * (8 + len(ctx.diff_input_wires))
+            return (None,) * (2 + ctx.num_tensors)
 
         with _gpu_transport_mode(ctx.tesseract, ctx.gpu_transport):
             vjp_result = ctx.tesseract.vector_jacobian_product(
@@ -509,10 +580,9 @@ class _TesseractFunction(torch.autograd.Function):
             g = vjp_result.get(wire)
             grad_inputs.append(_to_tensor(g).to(device) if g is not None else None)
 
-        # None for (tesseract, diff_input_paths, diff_input_wires,
-        #           diff_output_templates, all_paths, static_inputs,
-        #           gpu_transport, holder)
-        return (None, None, None, None, None, None, None, None, *grad_inputs)
+        return (None, None, *grad_inputs) + (None,) * (
+            ctx.num_tensors - len(grad_inputs)
+        )
 
     @staticmethod
     def jvp(
@@ -520,10 +590,7 @@ class _TesseractFunction(torch.autograd.Function):
         *tangents: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...]:
         """Forward-mode AD via the Tesseract's JVP endpoint."""
-        # tangents: (tesseract, diff_input_paths, diff_input_wires,
-        #            diff_output_templates, all_paths, static_inputs,
-        #            gpu_transport, holder, *tensor_tangents)
-        tensor_tangents = tangents[8:]
+        tensor_tangents = tangents[2 : 2 + len(ctx.diff_input_wires)]
 
         tangent_vector: dict[str, Any] = {}
         jvp_inputs: list[str] = []
@@ -534,9 +601,6 @@ class _TesseractFunction(torch.autograd.Function):
                 )
                 jvp_inputs.append(wire)
 
-        # apply_tesseract only routes tensors on a differentiable path into the
-        # autograd Function, so torch calls jvp only when at least one carries a
-        # forward tangent. jvp_inputs is therefore never empty here.
         assert jvp_inputs, "jvp called with no forward tangents"
 
         with _gpu_transport_mode(ctx.tesseract, ctx.gpu_transport):
@@ -549,6 +613,174 @@ class _TesseractFunction(torch.autograd.Function):
 
         return tuple(_to_tensor(jvp_result[wire]) for wire in ctx.diff_output_wires)
 
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[int | None, ...],
+        params: _DispatchParams,
+        slot: _ResultSlot,
+        *tensors: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[int, ...]]:
+        """Batching rule for ``torch.vmap``, following ``params.vmap_method``.
+
+        ``"sequential"`` calls the Tesseract once per batch element.
+        ``"expand_dims"`` and ``"broadcast_all"`` call it once, after giving
+        every unbatched array input a leading dimension of size 1 or of the
+        batch size respectively.
+
+        Every array output comes back batched along dim 0, the
+        non-differentiable ones as tensors too, since a NumPy array cannot
+        carry the batch dimension. Other outputs are returned once.
+        """
+        method = params.vmap_method
+        if method is None:
+            raise NotImplementedError(
+                "torch.vmap over apply_tesseract needs a batching strategy. Pass "
+                f"vmap_method (one of {list(_VMAP_METHODS)}) to apply_tesseract."
+            )
+        batch_size = info.batch_size
+        dims = in_dims[2:]
+        if method == "sequential" and batch_size == 0:
+            raise ValueError(
+                'vmap_method="sequential" cannot batch over an empty batch, since '
+                "it takes the outputs from the per-element calls."
+            )
+        if method == "sequential":
+            calls = []
+            for i in range(batch_size):
+                sliced = [
+                    t if d is None else t.select(d, i)
+                    for t, d in zip(tensors, dims, strict=True)
+                ]
+                calls.append(_call_leaves(params, sliced))
+            batched = {
+                path: _stack_leaf(path, [call[path] for call in calls])
+                for path in calls[0]
+            }
+        else:
+            moved = [
+                _with_batch_dim(t, method, batch_size) if d is None else t.movedim(d, 0)
+                for t, d in zip(tensors, dims, strict=True)
+            ]
+            static = {
+                path: _with_batch_dim(value, method, batch_size)
+                for path, value in params.static_inputs.items()
+            }
+            leaves = _call_leaves(replace(params, static_inputs=static), moved)
+            batched = {
+                path: _expand_leaf(path, value, batch_size, method)
+                for path, value in leaves.items()
+            }
+
+        slot.flat_result = batched
+        slot.outputs = [
+            (path, None)
+            for path, value in batched.items()
+            if isinstance(value, torch.Tensor)
+        ]
+        output_tensors = tuple(batched[path] for path, _ in slot.outputs)
+        return output_tensors, (0,) * len(output_tensors)
+
+
+def _call_leaves(
+    params: _DispatchParams, tensors: list[torch.Tensor]
+) -> dict[KeyType, Any]:
+    """Call the Tesseract once and return every output leaf by path.
+
+    Flattens all the way down, so arrays inside a container the schema does not
+    mark differentiable are found too. Arrays come back as tensors, the
+    differentiable ones still attached to autograd.
+    """
+    slot = _ResultSlot()
+    output_tensors = _TesseractFunction.apply(params, slot, *tensors)
+    returned = {
+        path: tensor
+        for (path, _), tensor in zip(slot.outputs, output_tensors, strict=True)
+    }
+    leaves: dict[KeyType, Any] = {}
+    for path, value in slot.flat_result.items():
+        if path in returned:
+            leaves[path] = returned[path]
+            continue
+        for leaf_path, leaf in _flatten_pytree(value, path) or [(path, value)]:
+            is_array = isinstance(leaf, np.ndarray | np.generic)
+            leaves[leaf_path] = _to_tensor(leaf) if is_array else leaf
+    return leaves
+
+
+def _with_batch_dim(value: Any, vmap_method: str, batch_size: int) -> Any:
+    """Give an unbatched tensor or NumPy array a leading batch dimension.
+
+    Of size 1 for ``"expand_dims"``, and of the batch size for
+    ``"broadcast_all"``. Any other value is returned as it is.
+    """
+    if not isinstance(value, torch.Tensor | np.ndarray):
+        return value
+    value = value[None]
+    if vmap_method == "broadcast_all":
+        is_tensor = isinstance(value, torch.Tensor)
+        broadcast = torch.broadcast_to if is_tensor else np.broadcast_to
+        value = broadcast(value, (batch_size, *value.shape[1:]))
+    return value
+
+
+def _stack_leaf(path: KeyType, values: list[Any]) -> Any:
+    """Stack one output leaf of the per-element calls along a new dim 0.
+
+    A leaf that is not an array cannot carry a batch dimension, so the value
+    from the first element is returned, with a warning if another differs.
+    """
+    first = values[0]
+    if isinstance(first, torch.Tensor):
+        return torch.stack(values)
+    for index, value in enumerate(values[1:], start=1):
+        if _leaves_differ(value, first):
+            warnings.warn(
+                f"Tesseract returned the non-array output "
+                f"{'.'.join(str(part) for part in path)!r} as {value!r} for batch "
+                f"element {index}, but {first!r} for element 0. Non-array outputs "
+                "cannot carry a batch dimension, so the value from element 0 is "
+                "the one apply_tesseract returns and the others are ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+            break
+    return first
+
+
+def _leaves_differ(value: Any, first: Any) -> bool:
+    """Whether two non-array output leaves disagree.
+
+    ``!=`` settles it for decoded response data. A value whose comparison does
+    not reduce to a bool falls back to identity.
+    """
+    try:
+        return bool(value != first)
+    except (TypeError, ValueError):
+        return value is not first
+
+
+def _expand_leaf(path: KeyType, value: Any, batch_size: int, vmap_method: str) -> Any:
+    """Check an output leaf of a batched call and broadcast it to the batch.
+
+    Under ``"expand_dims"`` an output that depends on no batched input comes
+    back with a leading dimension of size 1, which is expanded to the batch
+    size. Under ``"broadcast_all"`` every array input already has the full
+    batch dimension, so only that size is accepted.
+    """
+    if not isinstance(value, torch.Tensor):
+        return value
+    allowed = (batch_size,) if vmap_method == "broadcast_all" else (batch_size, 1)
+    if value.ndim == 0 or value.shape[0] not in allowed:
+        sizes = " or ".join(str(size) for size in dict.fromkeys(allowed))
+        raise ValueError(
+            f"vmap_method={vmap_method!r} needs every array output to have a "
+            f"leading batch dimension of size {sizes}, but "
+            f"{'.'.join(str(part) for part in path)!r} has shape "
+            f"{tuple(value.shape)}."
+        )
+    return value.expand(batch_size, *value.shape[1:])
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -560,6 +792,7 @@ def apply_tesseract(
     inputs: dict[str, Any],
     *,
     gpu_transport: str | None = None,
+    vmap_method: str | None = None,
 ) -> dict[str, Any]:
     """Call a Tesseract as a differentiable PyTorch operation.
 
@@ -587,12 +820,31 @@ def apply_tesseract(
             CUDA tensors take the same host round-trip as CPU tensors. This is an
             experimental tesseract-core feature; see
             ``tesseract_core.runtime.cuda.ipc``.
+        vmap_method: How the call is batched under ``torch.vmap``. ``None``
+            (default) raises if a batched tensor reaches the call.
+            ``"sequential"`` calls the Tesseract once per batch element and
+            works with any schema.
+            ``"expand_dims"`` gives every unbatched tensor or NumPy array input
+            a leading dimension of size 1 and calls the Tesseract once; its
+            schema must accept the extra leading dimension (e.g.
+            ``Array[..., Float64]``) and it must broadcast size 1 against the
+            batch. ``"broadcast_all"`` does the same, but broadcasts the
+            unbatched inputs to the full batch size, for Tesseracts that need
+            matching shapes. Under ``torch.vmap`` non-differentiable array
+            outputs are returned as tensors, since a NumPy array cannot carry
+            the batch dimension. A non-array output is returned once: the
+            first element's value under ``"sequential"``, with a warning if
+            another element differs, and the batched call's value, which
+            describes the whole batch, under the other two methods. Cannot be
+            combined with ``gpu_transport``.
+            See :doc:`/content/vmap-methods`.
 
     Returns:
         Nested dict matching the Tesseract's output schema, with
         differentiable array outputs as ``torch.Tensor`` (with ``grad_fn``
         when inputs require grad) and non-differentiable outputs as-is
-        (NumPy arrays or scalars).
+        (NumPy arrays or scalars; array outputs become tensors under
+        ``torch.vmap``).
 
     Example::
 
@@ -607,6 +859,7 @@ def apply_tesseract(
         result["statistics"]["barycenter"].sum().backward()
     """
     _validate_gpu_transport(gpu_transport)
+    _validate_vmap_method(vmap_method, gpu_transport)
 
     openapi = tesseract.openapi_schema
     diff_in_paths = _get_differentiable_arrays(openapi, "ApplyInputSchema")
@@ -617,12 +870,11 @@ def apply_tesseract(
     # sub-models but not into opaque dict fields.
     all_paths = diff_in_paths | diff_out_paths
 
-    flat_inputs = _flatten_pytree(inputs, recurse_into=all_paths)
-
-    # Resolved once (not the raw request value): a LocalClient can't act on a
-    # device transport, so a CUDA tensor must still take the host round-trip for
-    # it. ``None`` means host round-trip.
-    active_transport = gpu_transport if _supports_gpu_transport(tesseract) else None
+    flat_inputs = [
+        item
+        for path, value in _flatten_pytree(inputs, recurse_into=all_paths)
+        for item in _open_array_containers(path, value)
+    ]
 
     # Partition into differentiable tensors vs static values. A declared path
     # may be a template, so match rather than compare: ``params.{}`` covers the
@@ -630,6 +882,8 @@ def apply_tesseract(
     diff_paths: list[KeyType] = []
     diff_wires: list[str] = []
     diff_tensors: list[torch.Tensor] = []
+    nondiff_paths: list[KeyType] = []
+    nondiff_tensors: list[torch.Tensor] = []
     static: dict[KeyType, Any] = {}
 
     for path, value in flat_inputs:
@@ -641,33 +895,30 @@ def apply_tesseract(
             diff_wires.append(wire)
             diff_tensors.append(value)
         elif isinstance(value, torch.Tensor):
-            static[path] = _tensor_to_numpy_or_cuda(
-                value, on_device=bool(active_transport)
-            )
+            nondiff_paths.append(path)
+            nondiff_tensors.append(value.detach())
         else:
             static[path] = value
 
-    # Mutable holder so forward() can pass the full result dict back to us
-    # without going through autograd's return values.
-    result_holder: list[Any] = []
-
+    params = _DispatchParams(
+        tesseract=tesseract,
+        tensor_paths=diff_paths + nondiff_paths,
+        diff_input_wires=diff_wires,
+        diff_output_templates=diff_out_templates,
+        all_paths=all_paths,
+        static_inputs=static,
+        gpu_transport=gpu_transport,
+        vmap_method=vmap_method,
+    )
+    slot = _ResultSlot()
     output_tensors = _TesseractFunction.apply(
-        tesseract,
-        diff_paths,
-        diff_wires,
-        diff_out_templates,
-        all_paths,
-        static,
-        gpu_transport,
-        result_holder,
-        *diff_tensors,
+        params, slot, *diff_tensors, *nondiff_tensors
     )
 
     # Reconstruct full output pytree. Names were resolved inside forward(),
     # since a dict-valued output has no concrete keys until apply() returns.
-    flat_result = dict(result_holder[0])
-    resolved_outputs = result_holder[1]
-    for (concrete, _wire), tensor in zip(resolved_outputs, output_tensors, strict=True):
+    flat_result = dict(slot.flat_result)
+    for (concrete, _wire), tensor in zip(slot.outputs, output_tensors, strict=True):
         flat_result[concrete] = tensor
 
     return _unflatten_pytree(flat_result)
