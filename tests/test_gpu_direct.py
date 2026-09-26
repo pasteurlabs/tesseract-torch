@@ -159,8 +159,8 @@ def test_grad_with_nondiff_array_input(served_gpu_tesseract):
     """A non-differentiable array input must not force an unwanted host copy.
 
     ``mask`` is passed as a CUDA tensor but is not declared ``Differentiable``
-    in the schema, so it is routed as a static input; the gradient is
-    requested only for ``a``. The real gradient wrt ``a`` must still come
+    in the schema, so it is passed through the autograd function without a
+    gradient; the gradient is requested only for ``a``. The real gradient wrt ``a`` must still come
     back correctly, on-device.
     """
     n = 8
