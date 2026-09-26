@@ -10,13 +10,7 @@ RuntimeError: apply_tesseract does not support torch.func transforms (torch.func
   - Forward mode: torch.autograd.forward_ad (dual tensors)
 ```
 
-`torch.func.vmap` reports the same limitation in PyTorch's own words:
-
-```
-RuntimeError: You tried to vmap over _TesseractFunction, but it does not have vmap support. Please override and implement the vmap staticmethod or set generate_vmap_rule=True.
-```
-
-**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. `torch.func.vmap` is refused a step earlier, by PyTorch itself, because the underlying `autograd.Function` defines no batching rule.
+**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, and `torch.func.jacrev` / `torch.func.jacfwd`, which build on them) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. `torch.vmap` is the exception; see the next entry.
 
 **Fix.** Use PyTorch's standard autograd API, which `apply_tesseract` supports in both modes:
 
@@ -33,6 +27,21 @@ with fwAD.dual_level():
     x_dual = fwAD.make_dual(torch.tensor([1.0, 2.0, 3.0]), torch.ones(3))
     result = apply_tesseract(tess, inputs={"x": x_dual})
     _, jvp = fwAD.unpack_dual(result["y"])
+```
+
+## `torch.vmap` without a `vmap_method`
+
+```
+NotImplementedError: torch.vmap over apply_tesseract needs a batching strategy. Pass vmap_method (one of ['sequential', 'expand_dims', 'broadcast_all']) to apply_tesseract.
+```
+
+**Cause.** A Tesseract call can be batched in more than one way, and which ones work depends on the Tesseract's schema, so `apply_tesseract` does not pick one for you.
+
+**Fix.** Pass `vmap_method` to the `apply_tesseract` call inside the batched function. `"sequential"` works with any schema; see [Batching with `torch.vmap`](vmap-methods.md) for the faster options. If the batched function also uses `torch.func.grad`, `torch.func.jacrev` or `torch.func.jacfwd`, see the previous entry: those transforms stay unsupported under `torch.vmap`.
+
+```python
+xs = torch.randn(8, 3)
+ys = torch.vmap(lambda x: apply_tesseract(tess, {"x": x}, vmap_method="sequential")["y"])(xs)
 ```
 
 ## Reverse-mode AD against a Tesseract without `vector_jacobian_product`

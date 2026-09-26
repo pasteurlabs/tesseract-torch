@@ -46,7 +46,7 @@ print(x.grad)  # has gradients
 
 ## Non-differentiable outputs
 
-Output fields not marked as `Differentiable[...]` are returned as plain NumPy arrays or Python scalars. Only differentiable output fields are returned as `torch.Tensor` instances that participate in autograd.
+Output fields not marked as `Differentiable[...]` are returned as plain NumPy arrays or Python scalars (inside `torch.vmap` with a `vmap_method`, non-differentiable array outputs come back as tensors; see [Batching with `torch.vmap`](vmap-methods.md)). Only differentiable output fields are returned as `torch.Tensor` instances that participate in autograd.
 
 If you need to use a non-differentiable output in downstream PyTorch computation, convert it explicitly:
 
