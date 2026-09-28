@@ -69,10 +69,10 @@ def dict_key_tess() -> Tesseract:
 # ---------------------------------------------------------------------------
 #
 # Cross-process CUDA IPC needs the Tesseract (producer) and the test process
-# (consumer) to be *separate* processes sharing the GPU -- a process cannot
-# open an IPC handle it exported itself. ``from_source`` provides that separate
-# process on this interpreter, and running on the host trivially shares the GPU
-# and IPC namespace with the test process.
+# (consumer) to be *separate* processes sharing the GPU, because a process
+# cannot open an IPC handle it exported itself. ``from_source`` runs the
+# Tesseract in a subprocess on this interpreter, which shares the GPU and IPC
+# namespace with the test process without needing Docker's ``--ipc=host``.
 
 
 @pytest.fixture(scope="module")

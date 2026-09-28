@@ -27,10 +27,9 @@ from tesseract_core.runtime.config import gpu_transport_type
 type KeyType = tuple[str | int, ...]
 
 
-# On-device transports the GPU path supports end-to-end, most preferred first.
-# Taken from tesseract-core's own ``gpu_transport`` enum (in its declaration
-# order) rather than hardcoded here so the two can't drift. The enum's
-# ``"none"`` is not a transport but the explicit host round-trip, handled
+# On-device transports, read from tesseract-core's ``gpu_transport`` enum so the
+# two can't drift. The default picks the first one the Tesseract advertises, in
+# declaration order. The enum's ``"none"`` means host round-trip and is handled
 # separately.
 _SUPPORTED_TRANSPORTS = tuple(t for t in get_args(gpu_transport_type) if t != "none")
 
@@ -51,15 +50,13 @@ def _validate_gpu_transport(gpu_transport: str | None) -> None:
 def _resolve_gpu_transport(
     tesseract: Tesseract, gpu_transport: str | None
 ) -> str | None:
-    """The transport a call switches the client to, or ``None`` to leave it be.
+    """Pick the transport for a call, or ``None`` to leave the client as is.
 
-    ``None`` (the caller named nothing) picks the first of
-    ``_SUPPORTED_TRANSPORTS`` the Tesseract advertises in
-    ``supported_gpu_transports``, which is empty for a Tesseract created without
-    one and for an in-process ``LocalClient``. A named transport, including
-    ``"none"``, is honoured even when the Tesseract advertises nothing, since a
-    plain ``from_url`` client has no way to declare one. It is dropped only for
-    a client that cannot be switched (see :func:`_supports_gpu_transport`).
+    If the caller named none, this is the first of ``_SUPPORTED_TRANSPORTS`` in
+    ``tesseract.supported_gpu_transports``. A named transport, including
+    ``"none"``, is used whenever :func:`_supports_gpu_transport` allows, even if
+    the Tesseract advertises nothing, because a plain ``from_url`` client cannot
+    advertise one.
     """
     if gpu_transport is None:
         available = tesseract.supported_gpu_transports
@@ -91,11 +88,10 @@ def _gpu_transport_mode(
 ) -> Generator[None]:
     """Temporarily switch a served Tesseract's HTTP client to ``gpu_transport``.
 
-    ``None`` is a no-op, so callers can wrap every call unconditionally.
-    ``"none"`` switches the client to the host round-trip in both directions,
-    overriding a transport the Tesseract was served with. Otherwise the caller
-    must have checked :func:`_supports_gpu_transport` first, which this assumes
-    (:func:`_resolve_gpu_transport` does).
+    ``None`` is a no-op, so callers can wrap every call unconditionally. Any
+    other value, including ``"none"`` for a host round-trip, overrides the
+    client's own transport and assumes the client passed
+    :func:`_supports_gpu_transport`, as :func:`_resolve_gpu_transport` ensures.
 
     tesseract-core treats the GPU transport as an axis independent of the host
     (CPU) array output format. ``_gpu_transport`` governs how CUDA *inputs* the
@@ -598,20 +594,19 @@ def apply_tesseract(
         inputs: Nested dict matching the Tesseract's input schema.  Provide
             ``torch.Tensor`` for array fields you want gradients through,
             and plain Python / NumPy values for everything else.
-        gpu_transport: Name of the on-device transport used to exchange CUDA
-            tensors with the Tesseract instead of a host round-trip (currently
-            ``"cuda_ipc"``), so array data never leaves the device. Requires a
-            served Tesseract (``HTTPClient``) with GPU access (e.g.
-            ``Tesseract.from_image(..., gpus=["all"], gpu_transport="cuda_ipc")``
-            or ``Tesseract.from_source(..., gpu_transport="cuda_ipc")``). It has
-            no effect on CPU tensors, plain NumPy inputs, or a local (in-process)
-            client, which already shares memory. For ``cuda_ipc`` both processes
-            must share the CUDA IPC namespace (Docker's ``--ipc=host``). The
-            default ``None`` uses the transport the Tesseract was created with,
-            if any (see ``Tesseract.supported_gpu_transports``), and ``"none"``
-            forces CUDA tensors through the same host round-trip as CPU tensors.
-            This is an experimental tesseract-core feature; see
-            ``tesseract_core.runtime.cuda.ipc``.
+        gpu_transport: On-device transport for exchanging CUDA tensors with the
+            Tesseract (currently ``"cuda_ipc"``), so array data never leaves the
+            device. The default ``None`` uses the transport the Tesseract was
+            created with, if any, as in ``Tesseract.from_image(...,
+            gpus=["all"], gpu_transport="cuda_ipc")`` or ``from_source(...,
+            gpu_transport="cuda_ipc")``. ``"none"`` sends CUDA tensors through
+            a host round-trip like CPU tensors. Transports only apply to a
+            served Tesseract (``HTTPClient``) with GPU access, and have no
+            effect on CPU tensors, NumPy inputs, or an in-process client, which
+            already shares memory. For ``cuda_ipc`` both processes must share
+            the CUDA IPC namespace (Docker's ``--ipc=host``). This is an
+            experimental tesseract-core feature (see
+            ``tesseract_core.runtime.cuda.ipc``).
 
     Returns:
         Nested dict matching the Tesseract's output schema, with
@@ -644,7 +639,6 @@ def apply_tesseract(
 
     flat_inputs = _flatten_pytree(inputs, recurse_into=all_paths)
 
-    # Resolved once for forward, backward and jvp alike.
     transport = _resolve_gpu_transport(tesseract, gpu_transport)
 
     # Partition into differentiable tensors vs static values. A declared path

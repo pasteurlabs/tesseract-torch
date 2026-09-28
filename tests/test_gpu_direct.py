@@ -1,17 +1,12 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-direct dispatch tests: ``apply_tesseract`` over ``cuda_ipc`` end to end.
+"""End-to-end tests of ``apply_tesseract`` over the ``cuda_ipc`` transport.
 
-With the ``cuda_ipc`` transport, a served (HTTP) Tesseract exchanges CUDA tensors
-via CUDA IPC handles instead of a host round-trip, keeping data on the device.
 The ``served_gpu_tesseract`` fixture is created with ``gpu_transport="cuda_ipc"``,
-so most tests call ``apply_tesseract`` without naming a transport and also cover
-picking it by default.
-
-These require a real GPU and a served (subprocess) GPU Tesseract, since CUDA
-IPC is cross-process and cannot be self-opened. Marked ``gpu``; the
-``served_gpu_tesseract`` fixture skips where no CUDA GPU is available.
+so tests that call ``apply_tesseract`` without naming a transport also cover the
+default picking it up. All tests are marked ``gpu``, and the fixture skips where
+no CUDA GPU is available.
 """
 
 from __future__ import annotations
@@ -58,11 +53,7 @@ def test_apply_matches_host_path(served_gpu_tesseract):
 
 
 def test_explicit_transport_on_client_without_one(served_gpu_tesseract):
-    """A named transport works on a client that advertises none.
-
-    A plain ``from_url`` client has no way to declare a transport, so naming
-    one per call is how it reaches cuda_ipc.
-    """
+    """A plain ``from_url`` client advertises no transport but can name one."""
     a = torch.arange(8, dtype=torch.float32, device="cuda")
     b = torch.ones(8, dtype=torch.float32, device="cuda")
 

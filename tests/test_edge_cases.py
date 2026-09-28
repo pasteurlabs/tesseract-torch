@@ -489,11 +489,7 @@ class TestPartialForwardTangents:
 
 
 class TestPathHelpers:
-    """The path helpers, which decide where a key ends, exercised directly.
-
-    These need no runtime, so they pin down the dotted-key handling without
-    going through a Tesseract.
-    """
+    """The path helpers, which decide where a key ends, exercised directly."""
 
     def test_a_dotted_key_is_one_segment(self):
         from tesseract_torch.function import _flatten_pytree, _unflatten_pytree

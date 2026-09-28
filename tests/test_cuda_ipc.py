@@ -6,7 +6,7 @@
 These exercise the pure-Python plumbing (the ``_gpu_transport_mode`` client
 toggle, the transport-name validation, and the ``_to_tensor`` decode gate)
 without needing a GPU or a served Tesseract. Full end-to-end coverage (a real
-``HTTPClient`` talking CUDA IPC to a GPU container) lives in ``test_gpu_direct``
+``HTTPClient`` talking CUDA IPC to a served GPU Tesseract) lives in ``test_gpu_direct``
 and tesseract-core's own suite; here we only need to verify tesseract-torch
 drives that API correctly.
 """
@@ -230,12 +230,12 @@ def test_default_is_host_roundtrip_for_local_client(vectoradd_tess):
 
 
 def test_named_transport_works_on_client_without_one():
-    """A plain ``from_url`` client advertises nothing but can still opt in."""
+    """A plain ``from_url`` client advertises no transport but can name one."""
     tess = _fake_tesseract(client=_fake_http_client())
     assert _resolve_gpu_transport(tess, "cuda_ipc") == "cuda_ipc"
 
 
-def test_none_overrides_the_tesseract_transport():
+def test_explicit_host_roundtrip_overrides_the_tesseract_transport():
     tess = _fake_tesseract(client=_fake_http_client("cuda_ipc"))
     assert _resolve_gpu_transport(tess, "none") == "none"
 
@@ -320,9 +320,9 @@ def test_gpu_transport_is_noop_for_local_client(vectoradd_tess):
     """``gpu_transport`` against a LocalClient must behave as without it.
 
     tests/vectoradd_tesseract is loaded via ``from_tesseract_api``, i.e. an
-    in-process LocalClient that already shares memory. ``_supports_gpu_transport``
-    is False for it, so the request resolves to inactive; this just confirms it
-    doesn't break the ordinary CPU path.
+    in-process LocalClient that already shares memory, so
+    ``_resolve_gpu_transport`` drops the request. This confirms that doesn't
+    break the ordinary CPU path.
     """
     a = torch.tensor([1.0, 2.0, 3.0])
     b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
@@ -346,12 +346,10 @@ class TestCudaTensorWithoutDeviceTransport:
     ):
         """``gpu_transport`` against a LocalClient must still host-copy.
 
-        ``_supports_gpu_transport`` is False for a LocalClient (see
-        test_supports_gpu_transport_false_for_local_client_shaped_object), so
-        the request is resolved to inactive and the CUDA tensor still takes the
-        host round-trip -- passing it through raw would reach the in-process
-        endpoint's NumPy-based code, which cannot read GPU memory and would
-        raise. This is a regression test for exactly that failure mode.
+        ``_resolve_gpu_transport`` drops the request for a LocalClient, so the
+        CUDA tensor still takes the host round-trip. Passed through raw, it
+        would reach the in-process endpoint's NumPy-based code, which cannot
+        read GPU memory and would raise.
         """
         a = torch.tensor([1.0, 2.0, 3.0], device="cuda")
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
