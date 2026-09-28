@@ -3,7 +3,7 @@
 ## Quick start
 
 ```{note}
-Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.12+).
 ```
 
 ```{seealso}

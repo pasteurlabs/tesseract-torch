@@ -23,7 +23,7 @@ x_tensor.grad  # gradients flow through the Tesseract
 ## Quick start
 
 > [!NOTE]
-> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.12+).
 
 > [!IMPORTANT]
 > For more detailed installation instructions, please refer to the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/introduction/installation.html).
