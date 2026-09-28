@@ -136,6 +136,11 @@ def _to_tensor(arr: Any) -> torch.Tensor:
     return torch.as_tensor(a)
 
 
+def _is_zero_or_none(t: torch.Tensor | None) -> bool:
+    """True for a missing or all-zero (co)tangent. NaN counts as nonzero."""
+    return t is None or not bool(t.any())
+
+
 def _tensor_to_numpy_or_cuda(t: torch.Tensor, *, on_device: bool = False) -> Any:
     """Convert a torch tensor to a numpy array, or pass a CUDA tensor through.
 
@@ -358,6 +363,10 @@ def _relist(node: Any) -> Any:
 # Core autograd function
 # ---------------------------------------------------------------------------
 
+# Number of non-tensor arguments forward() takes ahead of *tensors. backward()
+# and jvp() see one slot per forward() argument and skip these.
+_N_NON_TENSOR_ARGS = 8
+
 
 class _TesseractFunction(torch.autograd.Function):
     """Low-level autograd function wrapping a Tesseract.
@@ -411,12 +420,7 @@ class _TesseractFunction(torch.autograd.Function):
         outputs: tuple[torch.Tensor, ...],
     ) -> None:
         """Save forward-pass metadata for use in backward / jvp."""
-        # Do not materialise zero cotangents for outputs the loss never used:
-        # let those arrive as None in backward() so we can drop them from the
-        # VJP request entirely, rather than paying the Tesseract to compute a
-        # gradient it will multiply by zero. (A seam with several
-        # differentiable outputs otherwise runs one autograd.grad per output on
-        # every backward, even for outputs with no incoming gradient.)
+        # Let cotangents of unused outputs arrive as None in backward().
         ctx.set_materialize_grads(False)
         (
             tesseract,
@@ -464,44 +468,58 @@ class _TesseractFunction(torch.autograd.Function):
         # has no concrete keys until apply() has returned.
         ctx.diff_output_wires = [wire for _, wire in holder[1]]
 
+        # Shape, dtype, and device of each output, in diff_output_wires order.
+        # jvp() uses these to place tangents on their output's device and to
+        # build zero tangents. Storing the outputs themselves would create a
+        # reference cycle through their grad_fn.
+        ctx.diff_output_specs = [(out.shape, out.dtype, out.device) for out in outputs]
+
     @staticmethod
     def backward(
         ctx: Any,
         *grad_outputs: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, ...]:
         """Reverse-mode AD via the Tesseract's VJP endpoint."""
-        # With set_materialize_grads(False) an output the loss did not use
-        # arrives as None. Request the VJP only for the outputs that carry an
-        # incoming cotangent, so a seam with several differentiable outputs is
-        # never asked to compute (and we never pay to transport) a gradient
-        # that would be multiplied by zero.
-        active_wires: list[str] = []
-        cotangent_vector: dict[str, Any] = {}
-        for wire, grad in zip(ctx.diff_output_wires, grad_outputs, strict=True):
-            if grad is None:
-                continue
-            active_wires.append(wire)
-            cotangent_vector[wire] = _tensor_to_numpy_or_cuda(
-                grad, on_device=bool(ctx.gpu_transport)
-            )
-
-        # No output carried a cotangent: the Tesseract cannot contribute any
-        # input gradient, so skip the VJP call entirely and return None for
-        # every input. Autograd normally prunes a node whose outputs are all
-        # off the backward path before calling backward(), so this is a
-        # defensive guard rather than a path a normal .backward() reaches.
+        # Request the VJP only for outputs with a nonzero cotangent. An unused
+        # output arrives as None, and any output may arrive as all zeros.
+        # Requesting either would compute and transport a gradient that is
+        # multiplied by zero, which is costly for a finite-difference VJP that
+        # pays per output.
+        cotangent_vector = {
+            wire: _tensor_to_numpy_or_cuda(grad, on_device=bool(ctx.gpu_transport))
+            for wire, grad in zip(ctx.diff_output_wires, grad_outputs, strict=True)
+            if not _is_zero_or_none(grad)
+        }
+        active_wires = list(cotangent_vector)
         if not active_wires:
-            # None for the eight non-tensor arguments, then one per input.
-            return (None,) * (8 + len(ctx.diff_input_wires))
+            return (None,) * (_N_NON_TENSOR_ARGS + len(ctx.diff_input_wires))
+
+        # Request gradients only for inputs that require grad, since a
+        # finite-difference VJP pays per input element. Every tensor on a
+        # differentiable path reaches forward() because it may carry a
+        # forward-mode tangent, so some of them need no gradient here.
+        # needs_input_grad reflects requires_grad at forward time, so an input
+        # left out of autograd.grad(inputs=...) is still requested.
+        needed_wires = [
+            wire
+            for wire, needed in zip(
+                ctx.diff_input_wires,
+                ctx.needs_input_grad[_N_NON_TENSOR_ARGS:],
+                strict=True,
+            )
+            if needed
+        ]
 
         with _gpu_transport_mode(ctx.tesseract, ctx.gpu_transport):
             vjp_result = ctx.tesseract.vector_jacobian_product(
                 inputs=_unflatten_pytree(ctx.saved_inputs),
-                vjp_inputs=list(ctx.diff_input_wires),
+                vjp_inputs=needed_wires,
                 vjp_outputs=active_wires,
                 cotangent_vector=cotangent_vector,
             )
 
+        # Inputs left out of the request get None, which autograd treats as a
+        # zero gradient.
         grad_inputs: list[torch.Tensor | None] = []
         for wire, device in zip(
             ctx.diff_input_wires, ctx.diff_input_devices, strict=True
@@ -509,10 +527,7 @@ class _TesseractFunction(torch.autograd.Function):
             g = vjp_result.get(wire)
             grad_inputs.append(_to_tensor(g).to(device) if g is not None else None)
 
-        # None for (tesseract, diff_input_paths, diff_input_wires,
-        #           diff_output_templates, all_paths, static_inputs,
-        #           gpu_transport, holder)
-        return (None, None, None, None, None, None, None, None, *grad_inputs)
+        return (*(None,) * _N_NON_TENSOR_ARGS, *grad_inputs)
 
     @staticmethod
     def jvp(
@@ -520,24 +535,26 @@ class _TesseractFunction(torch.autograd.Function):
         *tangents: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...]:
         """Forward-mode AD via the Tesseract's JVP endpoint."""
-        # tangents: (tesseract, diff_input_paths, diff_input_wires,
-        #            diff_output_templates, all_paths, static_inputs,
-        #            gpu_transport, holder, *tensor_tangents)
-        tensor_tangents = tangents[8:]
+        tensor_tangents = tangents[_N_NON_TENSOR_ARGS:]
 
-        tangent_vector: dict[str, Any] = {}
-        jvp_inputs: list[str] = []
-        for wire, t in zip(ctx.diff_input_wires, tensor_tangents, strict=True):
-            if t is not None:
-                tangent_vector[wire] = _tensor_to_numpy_or_cuda(
-                    t, on_device=bool(ctx.gpu_transport)
-                )
-                jvp_inputs.append(wire)
+        # Request the JVP only for inputs with a nonzero tangent. Inputs sliced
+        # from a one-hot-seeded dual tensor, as when building a Jacobian column
+        # by column, arrive with all-zero tangents rather than None.
+        tangent_vector = {
+            wire: _tensor_to_numpy_or_cuda(t, on_device=bool(ctx.gpu_transport))
+            for wire, t in zip(ctx.diff_input_wires, tensor_tangents, strict=True)
+            if not _is_zero_or_none(t)
+        }
+        jvp_inputs = list(tangent_vector)
 
-        # apply_tesseract only routes tensors on a differentiable path into the
-        # autograd Function, so torch calls jvp only when at least one carries a
-        # forward tangent. jvp_inputs is therefore never empty here.
-        assert jvp_inputs, "jvp called with no forward tangents"
+        # All input tangents are zero, so all output tangents are too. Torch
+        # rejects None from jvp(), so return explicit zeros without calling
+        # the Tesseract.
+        if not jvp_inputs:
+            return tuple(
+                torch.zeros(shape, dtype=dtype, device=device)
+                for shape, dtype, device in ctx.diff_output_specs
+            )
 
         with _gpu_transport_mode(ctx.tesseract, ctx.gpu_transport):
             jvp_result = ctx.tesseract.jacobian_vector_product(
@@ -547,7 +564,12 @@ class _TesseractFunction(torch.autograd.Function):
                 tangent_vector=tangent_vector,
             )
 
-        return tuple(_to_tensor(jvp_result[wire]) for wire in ctx.diff_output_wires)
+        return tuple(
+            _to_tensor(jvp_result[wire]).to(device)
+            for wire, (_, _, device) in zip(
+                ctx.diff_output_wires, ctx.diff_output_specs, strict=True
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
