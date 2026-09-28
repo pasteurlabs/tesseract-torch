@@ -80,4 +80,4 @@ RuntimeError: Error running Tesseract API jacobian_vector_product: Nested forwar
 
 **Cause.** `Tesseract.from_tesseract_api(...)` runs the Tesseract in your own Python process. If its `jacobian_vector_product` is itself implemented with `torch.func.jvp` (as the Tesseracts in `examples/` are), that call opens a second forward-AD level inside your `dual_level()` block, which PyTorch refuses.
 
-**Fix.** Serve the Tesseract in a container (`Tesseract.from_image(...)` followed by `.serve()`, or a `with` block), which is how the examples run it. Reverse-mode AD is unaffected either way.
+**Fix.** Run the Tesseract in its own process. `Tesseract.from_source("path/to/tesseract_api.py")` does that without Docker; pass `python_executable=sys.executable` to reuse your current environment instead of building one from the Tesseract's requirements. A container (`Tesseract.from_image(...)`) works too, and is how the examples run it. Either way, call `.serve()` first or use a `with` block. Reverse-mode AD is unaffected either way.

@@ -1,14 +1,10 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-import socket
-import subprocess
-import time
+import sys
 from pathlib import Path
 
 import pytest
-import requests
 from tesseract_core import Tesseract
 
 here = Path(__file__).parent
@@ -74,102 +70,22 @@ def dict_key_tess() -> Tesseract:
 #
 # Cross-process CUDA IPC needs the Tesseract (producer) and the test process
 # (consumer) to be *separate* processes sharing the GPU -- a process cannot
-# open an IPC handle it exported itself. So the GPU test Tesseract is served
-# via a bare ``tesseract-runtime serve`` subprocess (not Docker): running on
-# the host trivially shares the GPU and IPC namespace with the test process,
-# with no ``--ipc=host`` container flag needed.
-
-
-def _find_free_port() -> int:
-    """Find a free port to use for the test server."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 0))
-        return s.getsockname()[1]
-
-
-def _serve_tesseract(
-    tmp_path_factory, api_path, *, name: str, extra_env: dict | None = None
-):
-    """Start a tesseract-runtime server and yield its URL.
-
-    ``extra_env`` merges additional environment variables into the server
-    process (e.g. the cuda_ipc opt-in for the GPU fixture).
-    """
-    port = _find_free_port()
-    timeout = 10
-
-    output_dir = tmp_path_factory.mktemp(f"tesseract_output_{name}")
-
-    env = os.environ.copy()
-    env["TESSERACT_API_PATH"] = str(api_path)
-    env["TESSERACT_OUTPUT_PATH"] = str(output_dir)
-    if extra_env:
-        env.update(extra_env)
-
-    process = subprocess.Popen(
-        ["tesseract-runtime", "serve", "--host", "localhost", "--port", str(port)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    def _server_output() -> str:
-        """Collect whatever the server process has printed so far."""
-        try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-        return (
-            f"--- {name} server stdout ---\n{stdout.decode(errors='replace')}\n"
-            f"--- {name} server stderr ---\n{stderr.decode(errors='replace')}"
-        )
-
-    try:
-        start_time = time.time()
-        while True:
-            # Fail fast (and surface the reason) if the server already crashed.
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"Tesseract {name!r} server exited early with code "
-                    f"{process.returncode}\n{_server_output()}"
-                )
-            try:
-                requests.get(f"http://localhost:{port}/health")
-                break
-            except requests.exceptions.ConnectionError as exc:
-                if time.time() - start_time > timeout:
-                    raise TimeoutError(
-                        f"Tesseract {name!r} did not start in time\n{_server_output()}"
-                    ) from exc
-                time.sleep(0.1)
-
-        yield f"http://localhost:{port}"
-    finally:
-        process.terminate()
-        process.communicate()
+# open an IPC handle it exported itself. ``from_source`` provides that separate
+# process on this interpreter, and running on the host trivially shares the GPU
+# and IPC namespace with the test process.
 
 
 @pytest.fixture(scope="module")
-def served_gpu_tesseract(tmp_path_factory):
+def served_gpu_tesseract():
     """A served GPU Tesseract with cuda_ipc enabled. Skips without a CUDA GPU."""
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA GPU available")
 
-    gen = _serve_tesseract(
-        tmp_path_factory,
+    with Tesseract.from_source(
         here / "gpu_tesseract" / "tesseract_api.py",
-        name="gpu",
-        extra_env={
-            # Serve GPU arrays over the cuda_ipc transport (env form of the
-            # runtime's gpu_transport config).
-            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
-        },
-    )
-    url = next(gen)
-    try:
-        yield Tesseract.from_url(url)
-    finally:
-        gen.close()
+        python_executable=sys.executable,
+        gpu_transport="cuda_ipc",
+    ) as tess:
+        yield tess

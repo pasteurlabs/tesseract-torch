@@ -68,6 +68,9 @@ x_tensor.grad  # gradients flow through the Tesseract
    ```
 
 > [!TIP]
+> To skip Docker, replace `Tesseract.from_image("vectoradd_torch")` with `Tesseract.from_source("tesseract-torch/examples/simple/vectoradd_torch/tesseract_api.py")`. This serves the Tesseract in a subprocess, building a virtual environment from its requirements on first use (which needs [`uv`](https://docs.astral.sh/uv/)).
+
+> [!TIP]
 > Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-torch/tree/main/examples) for more ways to use Tesseract-Torch.
 
 ## Sharp edges

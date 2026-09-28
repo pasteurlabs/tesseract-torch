@@ -8,7 +8,7 @@ authors = [
 requires-python = ">=3.12,<4"
 dependencies = [
     "torch>=2.0",
-    "tesseract-core",
+    "tesseract-core>=1.14.0",
 ]
 dynamic = ["version"]
 
@@ -33,7 +33,6 @@ dev = [
     "pytest-cov",
     "pytest-timeout",
     "typeguard",
-    "requests",
     "tesseract-core[runtime]",
     "tesseract-torch[docs]",
 ]
