@@ -108,7 +108,3 @@ torch.vmap(f)(xs).sum().backward()
 Nested `torch.vmap` works with every method. Under `"expand_dims"` and `"broadcast_all"` each level adds a leading dimension, so the Tesseract sees shapes like `(batch_1, batch_2, ...)`.
 
 `torch.vmap(f, chunk_size=k)` splits the batch into chunks of `k` elements. Under `"expand_dims"` and `"broadcast_all"` it makes one batched call per chunk; `"sequential"` still calls once per element.
-
-## GPU transport
-
-`vmap_method` cannot be combined with `gpu_transport` yet. Passing both raises a `ValueError`.

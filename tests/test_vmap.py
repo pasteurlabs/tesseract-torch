@@ -345,16 +345,34 @@ def test_unknown_method_raises(batched_tess):
         _call(batched_tess, a[0], b, c, "loop")
 
 
-def test_gpu_transport_with_vmap_method_raises(batched_tess):
-    a, b, c = _data()
+class _DeviceArray:
+    """Stands in for the ``IpcDeviceArray`` a ``cuda_ipc`` response decodes to."""
 
-    with pytest.raises(ValueError, match="gpu_transport"):
-        apply_tesseract(
-            batched_tess,
-            {"a": a[0], "b": b, "c": c},
-            gpu_transport="cuda_ipc",
-            vmap_method="sequential",
-        )
+    def __init__(self, array):
+        self._array = np.array(array)
+        self.__cuda_array_interface__ = {}
+
+    def __dlpack__(self, **kwargs):
+        return self._array.__dlpack__(**kwargs)
+
+    def __dlpack_device__(self):
+        return self._array.__dlpack_device__()
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_device_array_output_is_batched(batched_tess, monkeypatch, method):
+    a, b, c = _data()
+    endpoint = batched_tess.apply
+
+    def apply(inputs):
+        out = endpoint(inputs)
+        out["extras"]["z"] = _DeviceArray(out["extras"]["z"])
+        return out
+
+    monkeypatch.setattr(batched_tess, "apply", apply)
+
+    z = torch.vmap(lambda x: _call(batched_tess, x, b, c, method)["extras"]["z"])(a)
+    torch.testing.assert_close(z, a + torch.from_numpy(c))
 
 
 def test_nested_schema_sequential(nested_tess):

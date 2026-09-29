@@ -52,19 +52,13 @@ def _validate_gpu_transport(gpu_transport: str | None) -> None:
 _VMAP_METHODS = ("sequential", "expand_dims", "broadcast_all")
 
 
-def _validate_vmap_method(vmap_method: str | None, gpu_transport: str | None) -> None:
-    """Reject a batching strategy the ``torch.vmap`` rule does not implement.
-
-    The rule is not wired up to the on-device transports yet, so combining the
-    two options is rejected up front.
-    """
+def _validate_vmap_method(vmap_method: str | None) -> None:
+    """Reject a batching strategy the ``torch.vmap`` rule does not implement."""
     if vmap_method is not None and vmap_method not in _VMAP_METHODS:
         raise ValueError(
             f"Unsupported vmap_method {vmap_method!r}; "
             f"supported: {list(_VMAP_METHODS)}."
         )
-    if vmap_method is not None and gpu_transport is not None:
-        raise ValueError("vmap_method cannot be combined with gpu_transport yet.")
 
 
 def _supports_gpu_transport(tesseract: Tesseract) -> bool:
@@ -703,7 +697,9 @@ def _call_leaves(
             leaves[path] = returned[path]
             continue
         for leaf_path, leaf in _flatten_pytree(value, path) or [(path, value)]:
-            is_array = isinstance(leaf, np.ndarray | np.generic)
+            is_array = isinstance(leaf, np.ndarray | np.generic) or hasattr(
+                leaf, "__cuda_array_interface__"
+            )
             leaves[leaf_path] = _to_tensor(leaf) if is_array else leaf
     return leaves
 
@@ -835,8 +831,7 @@ def apply_tesseract(
             the batch dimension. A non-array output is returned once: the
             first element's value under ``"sequential"``, with a warning if
             another element differs, and the batched call's value, which
-            describes the whole batch, under the other two methods. Cannot be
-            combined with ``gpu_transport``.
+            describes the whole batch, under the other two methods.
             See :doc:`/content/vmap-methods`.
 
     Returns:
@@ -859,7 +854,7 @@ def apply_tesseract(
         result["statistics"]["barycenter"].sum().backward()
     """
     _validate_gpu_transport(gpu_transport)
-    _validate_vmap_method(vmap_method, gpu_transport)
+    _validate_vmap_method(vmap_method)
 
     openapi = tesseract.openapi_schema
     diff_in_paths = _get_differentiable_arrays(openapi, "ApplyInputSchema")
