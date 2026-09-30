@@ -74,7 +74,9 @@ x_tensor.grad  # gradients flow through the Tesseract
 
 - **Required endpoints**: Using `apply_tesseract` with reverse-mode AD (`.backward()`, `torch.autograd.grad`) requires the Tesseract to define a [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) endpoint. Forward-mode AD (`torch.autograd.forward_ad`) requires [`jacobian_vector_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#jacobian-vector-product).
 
-- **`torch.func` transforms are not supported**: `apply_tesseract` works with PyTorch's standard autograd API (`.backward()`, `torch.autograd.grad`, `torch.autograd.forward_ad`), but **not** with `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.vmap`). These transforms create functionalized tensors that cannot be converted to NumPy arrays, which Tesseract endpoints require. Calling `apply_tesseract` inside a `torch.func` transform will raise a clear error.
+- **Other `torch.func` transforms are not supported**: `apply_tesseract` works with PyTorch's standard autograd API (`.backward()`, `torch.autograd.grad`, `torch.autograd.forward_ad`), but **not** with `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.jacrev`, `torch.func.jacfwd`). These transforms create functionalized tensors that cannot be converted to NumPy arrays, which Tesseract endpoints require. Calling `apply_tesseract` inside a `torch.func` transform will raise a clear error.
+
+- **`torch.vmap` needs a `vmap_method`**: pass `vmap_method="sequential"`, `"expand_dims"` or `"broadcast_all"` to `apply_tesseract` to batch it with `torch.vmap`; without one, `torch.vmap` raises when a batched tensor reaches `apply_tesseract`. See [Batching with `torch.vmap`](https://docs.pasteurlabs.ai/projects/tesseract-torch/latest/content/vmap-methods.html).
 
 ## License
 
