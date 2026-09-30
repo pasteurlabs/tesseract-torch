@@ -8,10 +8,8 @@ Covers reported issues and scenarios that early testers are likely to encounter.
 
 import numpy as np
 import pytest
-import tesseract_core
 import torch
 import torch.autograd.forward_ad as fwAD
-from packaging.version import Version
 
 from tesseract_torch import apply_tesseract
 
@@ -490,22 +488,8 @@ class TestPartialForwardTangents:
         torch.testing.assert_close(tangent, expected * tangent_in)
 
 
-# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
-# which landed after 1.12.0. Drop this guard once the minimum version is past it.
-_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
-
-_needs_wide_keys = pytest.mark.skipif(
-    not _CORE_ACCEPTS_WIDE_KEYS,
-    reason=f"tesseract-core {tesseract_core.__version__} rejects these keys (needs > 1.12.0)",
-)
-
-
 class TestPathHelpers:
-    """The path helpers, which decide where a key ends, exercised directly.
-
-    These need no runtime, so they cover the dotted-key handling on every
-    tesseract-core version, including ones that reject such keys on the wire.
-    """
+    """The path helpers, which decide where a key ends, exercised directly."""
 
     def test_a_dotted_key_is_one_segment(self):
         from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
@@ -550,12 +534,7 @@ class TestDottedDictKeys:
 
     @pytest.mark.parametrize(
         "key",
-        [
-            "plain",
-            pytest.param("a/b", marks=_needs_wide_keys),
-            pytest.param("a:b", marks=_needs_wide_keys),
-            pytest.param("layer.0.weight", marks=_needs_wide_keys),
-        ],
+        ["plain", "a/b", "a:b", "layer.0.weight"],
     )
     def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
         """Joining segments and splitting again drops the dotted key.

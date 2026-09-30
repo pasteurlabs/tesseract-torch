@@ -3,7 +3,7 @@
 ## Quick start
 
 ```{note}
-Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.12+).
 ```
 
 ```{seealso}
@@ -53,6 +53,17 @@ For more detailed installation instructions, please refer to the [Tesseract Core
        result = apply_tesseract(t, {"a": {"v": x_dual}, "b": {"v": y}})
        _, tangent = fwAD.unpack_dual(result["vector_add"]["result"])
    ```
+
+````{tip}
+To skip Docker, serve the Tesseract from its source directory in a subprocess instead of building an image:
+
+```python
+t = Tesseract.from_source("tesseract-torch/examples/simple/vectoradd_torch/tesseract_api.py")
+t.serve()
+```
+
+This builds a virtual environment from the Tesseract's requirements next to `tesseract_api.py` on first use (which needs [`uv`](https://docs.astral.sh/uv/)), or runs on an existing interpreter passed as `python_executable=...`. Unlike a container, it is not isolated from your environment and filesystem.
+````
 
 ```{tip}
 Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-torch/tree/main/examples) for ways to use Tesseract-Torch.
