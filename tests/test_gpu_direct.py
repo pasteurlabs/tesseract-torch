@@ -81,6 +81,29 @@ def test_grad_through_cuda_ipc(served_gpu_tesseract):
     np.testing.assert_allclose(a.grad.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
 
 
+def test_vmap_through_cuda_ipc(served_gpu_tesseract):
+    """``torch.vmap`` batches the cuda_ipc path, on-device outputs included."""
+    a = torch.randn(4, 64, device="cuda", requires_grad=True)
+    b = torch.ones(64, device="cuda")
+
+    out = torch.vmap(
+        lambda x: apply_tesseract(
+            served_gpu_tesseract,
+            {"a": x, "b": b},
+            vmap_method="sequential",
+        )
+    )(a)
+    expected = a.detach() * 2.0 + b
+
+    assert out["c"].is_cuda
+    torch.testing.assert_close(out["c"], expected)
+    torch.testing.assert_close(out["c_sum"].cpu().reshape(4), expected.sum(dim=1).cpu())
+
+    out["c"].sum().backward()
+    assert a.grad.is_cuda
+    torch.testing.assert_close(a.grad, torch.full_like(a, 2.0))
+
+
 def test_jvp_through_cuda_ipc(served_gpu_tesseract):
     """Forward-mode AD dispatches through the same cuda_ipc path (jvp)."""
     import torch.autograd.forward_ad as fwAD
@@ -156,8 +179,8 @@ def test_grad_with_nondiff_array_input(served_gpu_tesseract):
     """A non-differentiable array input must not force an unwanted host copy.
 
     ``mask`` is passed as a CUDA tensor but is not declared ``Differentiable``
-    in the schema, so it is routed as a static input; the gradient is
-    requested only for ``a``. The real gradient wrt ``a`` must still come
+    in the schema, so it is passed through the autograd function without a
+    gradient; the gradient is requested only for ``a``. The real gradient wrt ``a`` must still come
     back correctly, on-device.
     """
     n = 8
