@@ -28,10 +28,12 @@ type KeyType = tuple[str | int, ...]
 
 
 # On-device transports, read from tesseract-core's ``gpu_transport`` enum so the
-# two can't drift. The default picks the first one the Tesseract advertises, in
-# declaration order. The enum's ``"none"`` means host round-trip and is handled
+# two can't drift. The enum's ``"none"`` means host round-trip and is handled
 # separately.
-_SUPPORTED_TRANSPORTS = tuple(t for t in get_args(gpu_transport_type) if t != "none")
+_SUPPORTED_TRANSPORTS = frozenset(get_args(gpu_transport_type)) - {"none"}
+
+# The transport a call uses by default, when the Tesseract advertises it.
+_DEFAULT_GPU_TRANSPORT = "cuda_ipc"
 
 
 def _validate_gpu_transport(gpu_transport: str | None) -> None:
@@ -43,30 +45,26 @@ def _validate_gpu_transport(gpu_transport: str | None) -> None:
     if gpu_transport not in (None, "none", *_SUPPORTED_TRANSPORTS):
         raise ValueError(
             f"Unsupported gpu_transport {gpu_transport!r}; "
-            f"supported: {['none', *_SUPPORTED_TRANSPORTS]}."
+            f"supported: {['none', *sorted(_SUPPORTED_TRANSPORTS)]}."
         )
 
 
-def _resolve_gpu_transport(
-    tesseract: Tesseract, gpu_transport: str | None
-) -> str | None:
-    """Pick the transport for a call, or ``None`` to leave the client as is.
+def _resolve_gpu_transport(tesseract: Tesseract, gpu_transport: str | None) -> str:
+    """Return the transport a call uses, either ``"none"`` or a device transport.
 
-    If the caller named none, this is the first of ``_SUPPORTED_TRANSPORTS`` in
-    ``tesseract.supported_gpu_transports``. A named transport, including
-    ``"none"``, is used whenever :func:`_supports_gpu_transport` allows, even if
-    the Tesseract advertises nothing, because a plain ``from_url`` client cannot
-    advertise one.
+    ``None`` selects ``_DEFAULT_GPU_TRANSPORT`` if the Tesseract advertises it in
+    ``supported_gpu_transports``, else ``"none"``. A named transport is used as
+    given even if the Tesseract advertises nothing, because a plain ``from_url``
+    client cannot advertise one. A client that fails
+    :func:`_supports_gpu_transport` always gets ``"none"``.
     """
+    if not _supports_gpu_transport(tesseract):
+        return "none"
     if gpu_transport is None:
-        available = tesseract.supported_gpu_transports
-        return next((t for t in _SUPPORTED_TRANSPORTS if t in available), None)
-    return gpu_transport if _supports_gpu_transport(tesseract) else None
-
-
-def _is_on_device(gpu_transport: str | None) -> bool:
-    """Whether a resolved transport keeps CUDA tensors on the device."""
-    return gpu_transport not in (None, "none")
+        if _DEFAULT_GPU_TRANSPORT in tesseract.supported_gpu_transports:
+            return _DEFAULT_GPU_TRANSPORT
+        return "none"
+    return gpu_transport
 
 
 def _supports_gpu_transport(tesseract: Tesseract) -> bool:
@@ -83,30 +81,27 @@ def _supports_gpu_transport(tesseract: Tesseract) -> bool:
 
 
 @contextlib.contextmanager
-def _gpu_transport_mode(
-    tesseract: Tesseract, gpu_transport: str | None
-) -> Generator[None]:
+def _gpu_transport_mode(tesseract: Tesseract, gpu_transport: str) -> Generator[None]:
     """Temporarily switch a served Tesseract's HTTP client to ``gpu_transport``.
 
-    ``None`` is a no-op, so callers can wrap every call unconditionally. Any
-    other value, including ``"none"`` for a host round-trip, overrides the
-    client's own transport and assumes the client passed
-    :func:`_supports_gpu_transport`, as :func:`_resolve_gpu_transport` ensures.
+    A no-op for a client that fails :func:`_supports_gpu_transport`, so callers
+    can wrap every call unconditionally.
 
     tesseract-core treats the GPU transport as an axis independent of the host
     (CPU) array output format. ``_gpu_transport`` governs how CUDA *inputs* the
     client sends are encoded (exported by IPC handle rather than host-copied).
-    The ``Accept`` header's ``gpu_transport`` media-type parameter asks the
-    served Tesseract to return CUDA *outputs* by IPC handle too. Both are set
-    here so a round trip stays on-device in both directions. The ``Accept`` media
-    type reuses the client's current ``_output_format`` so the CPU leaves of a
-    mixed response are unaffected.
+    The ``Accept`` header's ``gpu_transport`` media-type parameter selects how
+    the served Tesseract returns CUDA *outputs*. Both are set here, so a device
+    transport keeps a round trip on-device in both directions, and ``"none"``
+    keeps it on the host even when the Tesseract was served with a transport.
+    The ``Accept`` media type reuses the client's current ``_output_format`` so
+    the CPU leaves of a mixed response are unaffected.
 
     Scoped to a single call so a Tesseract shared across CPU-tensor and
     CUDA-tensor calls is not permanently switched over; mirrors
     ``tesseract_jax.tesseract_compat.Jaxeract.gpu_transport_encoding``.
     """
-    if gpu_transport is None:
+    if not _supports_gpu_transport(tesseract):
         yield
         return
 
@@ -395,7 +390,7 @@ class _TesseractFunction(torch.autograd.Function):
         diff_output_templates: list[str],
         all_paths: set[str],
         static_inputs: dict[KeyType, Any],
-        gpu_transport: str | None,
+        gpu_transport: str,
         non_diff_result_holder: list[Any],
         *tensors: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
@@ -409,7 +404,7 @@ class _TesseractFunction(torch.autograd.Function):
         differentiable output is declared as a template, and its concrete keys
         only exist once ``apply`` has returned.
         """
-        on_device = _is_on_device(gpu_transport)
+        on_device = gpu_transport != "none"
         flat_inputs = dict(static_inputs)
         for path, tensor in zip(diff_input_paths, tensors, strict=True):
             flat_inputs[path] = _tensor_to_numpy_or_cuda(tensor, on_device=on_device)
@@ -458,7 +453,7 @@ class _TesseractFunction(torch.autograd.Function):
         # Already resolved by apply_tesseract, so backward()/jvp() talk to the
         # Tesseract exactly as forward() did.
         ctx.gpu_transport = gpu_transport
-        ctx.on_device = _is_on_device(gpu_transport)
+        ctx.on_device = gpu_transport != "none"
 
         # Each input tensor's own device, in ctx.diff_input_wires order.
         # Autograd requires the gradient backward() returns for an input to
@@ -596,11 +591,13 @@ def apply_tesseract(
             and plain Python / NumPy values for everything else.
         gpu_transport: On-device transport for exchanging CUDA tensors with the
             Tesseract (currently ``"cuda_ipc"``), so array data never leaves the
-            device. The default ``None`` uses the transport the Tesseract was
-            created with, if any, as in ``Tesseract.from_image(...,
-            gpus=["all"], gpu_transport="cuda_ipc")`` or ``from_source(...,
-            gpu_transport="cuda_ipc")``. ``"none"`` sends CUDA tensors through
-            a host round-trip like CPU tensors. Transports only apply to a
+            device. The default ``None`` uses ``"cuda_ipc"`` if the Tesseract
+            advertises it in ``supported_gpu_transports``, as one created with
+            ``Tesseract.from_image(..., gpus=["all"], gpu_transport="cuda_ipc")``
+            or ``from_source(..., gpu_transport="cuda_ipc")`` does, and a host
+            round-trip otherwise. ``"none"`` sends CUDA tensors through a host
+            round-trip like CPU tensors, in both directions, even if the
+            Tesseract was created with a transport. Transports only apply to a
             served Tesseract (``HTTPClient``) with GPU access, and have no
             effect on CPU tensors, NumPy inputs, or an in-process client, which
             already shares memory. For ``cuda_ipc`` both processes must share
@@ -659,7 +656,7 @@ def apply_tesseract(
             diff_tensors.append(value)
         elif isinstance(value, torch.Tensor):
             static[path] = _tensor_to_numpy_or_cuda(
-                value, on_device=_is_on_device(transport)
+                value, on_device=transport != "none"
             )
         else:
             static[path] = value

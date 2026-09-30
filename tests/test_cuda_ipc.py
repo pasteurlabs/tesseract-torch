@@ -215,18 +215,18 @@ def test_default_uses_the_transport_the_tesseract_was_created_with():
     assert _resolve_gpu_transport(tess, None) == "cuda_ipc"
 
 
-def test_default_leaves_a_client_without_transport_alone():
+def test_default_is_host_roundtrip_for_client_without_transport():
     tess = _fake_tesseract(client=_fake_http_client())
-    assert _resolve_gpu_transport(tess, None) is None
+    assert _resolve_gpu_transport(tess, None) == "none"
 
 
 def test_default_ignores_transports_tesseract_torch_lacks():
     tess = _fake_tesseract(client=_fake_http_client("nixl"))
-    assert _resolve_gpu_transport(tess, None) is None
+    assert _resolve_gpu_transport(tess, None) == "none"
 
 
 def test_default_is_host_roundtrip_for_local_client(vectoradd_tess):
-    assert _resolve_gpu_transport(vectoradd_tess, None) is None
+    assert _resolve_gpu_transport(vectoradd_tess, None) == "none"
 
 
 def test_named_transport_works_on_client_without_one():
@@ -241,7 +241,14 @@ def test_explicit_host_roundtrip_overrides_the_tesseract_transport():
 
 
 def test_named_transport_is_dropped_for_local_client(vectoradd_tess):
-    assert _resolve_gpu_transport(vectoradd_tess, "cuda_ipc") is None
+    assert _resolve_gpu_transport(vectoradd_tess, "cuda_ipc") == "none"
+
+
+def test_gpu_transport_mode_is_noop_for_local_client_shaped_object():
+    client = object()
+    tess = _fake_tesseract(client=client)
+    with _gpu_transport_mode(tess, "none"):
+        assert tess._client is client
 
 
 def test_gpu_transport_mode_forces_host_roundtrip():
