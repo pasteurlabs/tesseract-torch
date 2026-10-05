@@ -6,17 +6,17 @@ annotated-types==0.8.0
     # via pydantic
 certifi==2026.7.22
     # via requests
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
     # via requests
 colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
 cuda-bindings==13.4.3 ; python_full_version < '3.15' and sys_platform == 'linux'
     # via torch
-cuda-pathfinder==1.8.2 ; python_full_version < '3.15' and sys_platform == 'linux'
+cuda-pathfinder==1.8.3 ; python_full_version < '3.15' and sys_platform == 'linux'
     # via cuda-bindings
 cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
     # via torch
-filelock==4.0.4
+filelock==4.0.10
     # via torch
 fsspec==2026.9.0
     # via torch
@@ -28,7 +28,7 @@ jinja2==3.1.6
     #   torch
 markdown-it-py==4.2.0
     # via rich
-markupsafe==3.0.3
+markupsafe==3.0.4
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
@@ -109,7 +109,7 @@ sympy==1.14.0
     # via torch
 tesseract-core==1.14.0
     # via tesseract-torch
-torch==2.14.0
+torch==2.14.1
     # via tesseract-torch
 triton==3.8.0 ; python_full_version < '3.15' and sys_platform == 'linux'
     # via torch
