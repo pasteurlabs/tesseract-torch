@@ -229,7 +229,8 @@ def test_jvp_moves_tangents_to_output_device(nested_tess, monkeypatch):
         diff_input_wires=["x"],
         diff_output_wires=["y"],
         diff_output_specs=[(torch.Size([3]), torch.float32, torch.device("meta"))],
-        gpu_transport=None,
+        gpu_transport="none",
+        on_device=False,
         saved_inputs={},
     )
 

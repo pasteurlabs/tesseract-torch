@@ -1,14 +1,12 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-direct dispatch tests: ``apply_tesseract(..., gpu_transport="cuda_ipc")`` end to end.
+"""End-to-end tests of ``apply_tesseract`` over the ``cuda_ipc`` transport.
 
-With ``gpu_transport="cuda_ipc"``, a served (HTTP) Tesseract exchanges CUDA tensors via
-CUDA IPC handles instead of a host round-trip, keeping data on the device.
-
-These require a real GPU and a served (subprocess) GPU Tesseract, since CUDA
-IPC is cross-process and cannot be self-opened. Marked ``gpu``; the
-``served_gpu_tesseract`` fixture skips where no CUDA GPU is available.
+The ``served_gpu_tesseract`` fixture is created with ``gpu_transport="cuda_ipc"``,
+so tests that call ``apply_tesseract`` without naming a transport also cover the
+default picking it up. All tests are marked ``gpu``, and the fixture skips where
+no CUDA GPU is available.
 """
 
 from __future__ import annotations
@@ -16,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+from tesseract_core import Tesseract
 
 from tesseract_torch import apply_tesseract
 
@@ -26,9 +25,7 @@ pytestmark = pytest.mark.gpu
 def test_apply_matches_analytic(served_gpu_tesseract, n):
     a = torch.arange(n, dtype=torch.float32, device="cuda")
     b = torch.ones(n, dtype=torch.float32, device="cuda") * 3.0
-    out = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-    )
+    out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
     c = out["c"]
     assert c.is_cuda
     np.testing.assert_allclose(
@@ -39,23 +36,35 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
 def test_apply_matches_host_path(served_gpu_tesseract):
     """The cuda_ipc path must match the host-copy path exactly.
 
-    The baseline pins ``gpu_transport=None`` (the host round-trip)
-    explicitly rather than relying on the call default, so the comparison
-    stays meaningful even if the default ever becomes a device transport --
-    otherwise it could silently end up comparing the cuda_ipc path to itself.
+    ``gpu_transport="none"`` overrides the transport the Tesseract was created
+    with, in both directions, so the baseline comes back as a host tensor.
     """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
 
-    ipc = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
+    ipc = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
+    host = apply_tesseract(
+        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="none"
     )["c"]
-    host = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b}, gpu_transport=None)[
-        "c"
-    ]
 
     assert ipc.is_cuda
-    np.testing.assert_array_equal(ipc.cpu().numpy(), host.cpu().numpy())
+    assert not host.is_cuda
+    np.testing.assert_array_equal(ipc.cpu().numpy(), host.numpy())
+
+
+def test_explicit_transport_on_client_without_one(served_gpu_tesseract):
+    """A plain ``from_url`` client advertises no transport but can name one."""
+    a = torch.arange(8, dtype=torch.float32, device="cuda")
+    b = torch.ones(8, dtype=torch.float32, device="cuda")
+
+    with Tesseract.from_url(served_gpu_tesseract._client.url) as tess:
+        assert tess.supported_gpu_transports == ()
+        out = apply_tesseract(tess, {"a": a, "b": b}, gpu_transport="cuda_ipc")
+
+    assert out["c"].is_cuda
+    np.testing.assert_allclose(
+        out["c"].cpu().numpy(), a.cpu().numpy() * 2.0 + 1.0, rtol=1e-6
+    )
 
 
 def test_grad_through_cuda_ipc(served_gpu_tesseract):
@@ -64,9 +73,7 @@ def test_grad_through_cuda_ipc(served_gpu_tesseract):
     a = torch.arange(n, dtype=torch.float32, device="cuda", requires_grad=True)
     b = torch.ones(n, dtype=torch.float32, device="cuda")
 
-    out = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-    )
+    out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
     out["c"].sum().backward()
 
     assert a.grad.is_cuda
@@ -83,7 +90,6 @@ def test_vmap_through_cuda_ipc(served_gpu_tesseract):
         lambda x: apply_tesseract(
             served_gpu_tesseract,
             {"a": x, "b": b},
-            gpu_transport="cuda_ipc",
             vmap_method="sequential",
         )
     )(a)
@@ -111,11 +117,7 @@ def test_jvp_through_cuda_ipc(served_gpu_tesseract):
     with fwAD.dual_level():
         a_dual = fwAD.make_dual(a, ta)
         b_dual = fwAD.make_dual(b, tb)
-        out = apply_tesseract(
-            served_gpu_tesseract,
-            {"a": a_dual, "b": b_dual},
-            gpu_transport="cuda_ipc",
-        )
+        out = apply_tesseract(served_gpu_tesseract, {"a": a_dual, "b": b_dual})
         _primal, tangent = fwAD.unpack_dual(out["c"])
 
     assert tangent.is_cuda
@@ -142,11 +144,7 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
     with fwAD.dual_level():
         a_dual = fwAD.make_dual(a, ta)
         b_dual = fwAD.make_dual(b, tb)
-        out = apply_tesseract(
-            served_gpu_tesseract,
-            {"a": a_dual, "b": b_dual},
-            gpu_transport="cuda_ipc",
-        )
+        out = apply_tesseract(served_gpu_tesseract, {"a": a_dual, "b": b_dual})
         _primal, tangent = fwAD.unpack_dual(out["c"])
 
     assert tangent.is_cuda
@@ -169,9 +167,7 @@ def test_serial_reuse(served_gpu_tesseract):
     for i in range(20):
         a = torch.full((512,), float(i), dtype=torch.float32, device="cuda")
         b = torch.full((512,), float(2 * i), dtype=torch.float32, device="cuda")
-        out = apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )
+        out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
         np.testing.assert_allclose(
             out["c"].cpu().numpy(),
             np.full((512,), i * 2.0 + 2 * i, dtype=np.float32),
@@ -192,11 +188,7 @@ def test_grad_with_nondiff_array_input(served_gpu_tesseract):
     b = torch.ones(n, dtype=torch.float32, device="cuda")
     mask = torch.full((n,), 3.0, dtype=torch.float32, device="cuda")
 
-    out = apply_tesseract(
-        served_gpu_tesseract,
-        {"a": a, "b": b, "mask": mask},
-        gpu_transport="cuda_ipc",
-    )
+    out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b, "mask": mask})
     out["c"].sum().backward()
 
     assert a.grad.is_cuda

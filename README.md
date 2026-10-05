@@ -23,7 +23,7 @@ x_tensor.grad  # gradients flow through the Tesseract
 ## Quick start
 
 > [!NOTE]
-> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.12+).
 
 > [!IMPORTANT]
 > For more detailed installation instructions, please refer to the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/introduction/installation.html).
@@ -66,6 +66,9 @@ x_tensor.grad  # gradients flow through the Tesseract
 
    # Forward-mode AD is also supported via torch.autograd.forward_ad
    ```
+
+> [!TIP]
+> To skip Docker, replace `Tesseract.from_image("vectoradd_torch")` with `Tesseract.from_source("tesseract-torch/examples/simple/vectoradd_torch/tesseract_api.py")`. This serves the Tesseract in a subprocess, building a virtual environment from its requirements on first use (which needs [`uv`](https://docs.astral.sh/uv/)).
 
 > [!TIP]
 > Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-torch/tree/main/examples) for more ways to use Tesseract-Torch.
