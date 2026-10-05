@@ -53,34 +53,45 @@ def apply(inputs: InputSchema) -> OutputSchema:
 #
 
 
+def _record_request(env_var: str, paths: set[str]) -> None:
+    """Append sorted ``paths`` as a JSON line to the file named by ``$env_var``."""
+    import json
+    import os
+
+    path = os.environ.get(env_var)
+    if not path:
+        return
+    with open(path, "a") as fh:
+        fh.write(json.dumps(sorted(paths)) + "\n")
+
+
+def _zeros(inputs: InputSchema) -> dict:
+    """A correctly shaped zero per differentiable wire."""
+    import numpy as np
+
+    v_shape = np.asarray(inputs.vectors.v).shape
+    return {"scalars.a": np.float32(0.0), "vectors.v": np.zeros(v_shape, np.float32)}
+
+
 def jacobian_vector_product(
     inputs: InputSchema,
     jvp_inputs: set[str],
     jvp_outputs: set[str],
     tangent_vector,
 ):
-    out = {dy: 0.0 for dy in jvp_outputs}
+    _record_request("NESTED_JVP_RECORD", jvp_inputs)
+
+    # The runtime requires a tangent for every requested output, so an output
+    # unreachable from the requested inputs gets a shaped zero. The map is
+    # diagonal, so e.g. a JVP request for scalars.a alone yields a zero
+    # vectors.v tangent.
+    zeros = _zeros(inputs)
+    out = {dy: zeros[dy] for dy in jvp_outputs}
     if "scalars.a" in jvp_inputs and "scalars.a" in jvp_outputs:
         out["scalars.a"] = 10.0 * tangent_vector["scalars.a"]
     if "vectors.v" in jvp_inputs and "vectors.v" in jvp_outputs:
         out["vectors.v"] = 10.0 * tangent_vector["vectors.v"]
     return out
-
-
-def _record_vjp_outputs(vjp_outputs: set[str]) -> None:
-    """Append the sorted ``vjp_outputs`` received, as JSON, to a record file.
-
-    Set via ``$NESTED_VJP_RECORD``. Lets a test assert that ``backward()``
-    requests a VJP for only the outputs a loss actually used.
-    """
-    import json
-    import os
-
-    path = os.environ.get("NESTED_VJP_RECORD")
-    if not path:
-        return
-    with open(path, "a") as fh:
-        fh.write(json.dumps(sorted(vjp_outputs)) + "\n")
 
 
 def vector_jacobian_product(
@@ -89,18 +100,12 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector,
 ):
-    # The runtime requires a gradient for every requested input wire. An input
-    # not reachable from any REQUESTED output gets a correctly shaped zero, not
-    # a bare 0.0 scalar: the wrapper drops unused outputs from vjp_outputs, so
-    # e.g. a loss on scalars.a leaves vectors.v out and vectors.v's input
-    # gradient is a zero vector of v's shape. (The map is diagonal:
-    # scalars.a<-scalars.a, vectors.v<-vectors.v.)
-    import numpy as np
+    _record_request("NESTED_VJP_RECORD", vjp_outputs)
+    _record_request("NESTED_VJP_INPUTS_RECORD", vjp_inputs)
 
-    _record_vjp_outputs(vjp_outputs)
-
-    v_shape = np.asarray(inputs.vectors.v).shape
-    zeros = {"scalars.a": np.float32(0.0), "vectors.v": np.zeros(v_shape, np.float32)}
+    # Likewise, an input unreachable from the requested outputs gets a shaped
+    # zero gradient.
+    zeros = _zeros(inputs)
     out = {dx: zeros[dx] for dx in vjp_inputs}
     if "scalars.a" in vjp_inputs and "scalars.a" in vjp_outputs:
         out["scalars.a"] = 10.0 * cotangent_vector["scalars.a"]
