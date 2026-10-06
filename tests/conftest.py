@@ -70,6 +70,16 @@ def dict_key_tess() -> Tesseract:
     )
 
 
+@pytest.fixture(scope="module")
+def local_gpu_tesseract():
+    """The GPU Tesseract, loaded in-process. Skips without a CUDA GPU."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA GPU available")
+    return Tesseract.from_tesseract_api(here / "gpu_tesseract" / "tesseract_api.py")
+
+
 # ---------------------------------------------------------------------------
 # GPU (cuda_ipc) serving
 # ---------------------------------------------------------------------------
