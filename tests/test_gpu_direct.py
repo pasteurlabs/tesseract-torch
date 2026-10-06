@@ -217,7 +217,8 @@ def test_local_client_receives_cuda_tensors_with_named_transport(
     run_tesseract = client.run_tesseract
 
     def recording_run_tesseract(endpoint, payload=None, *args, **kwargs):
-        received.append(payload["inputs"]["a"])
+        if endpoint == "apply":
+            received.append(payload["inputs"]["a"])
         return run_tesseract(endpoint, payload, *args, **kwargs)
 
     monkeypatch.setattr(client, "run_tesseract", recording_run_tesseract)
