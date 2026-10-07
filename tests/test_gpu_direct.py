@@ -5,8 +5,9 @@
 
 The ``served_gpu_tesseract`` fixture is created with ``gpu_transport="cuda_ipc"``,
 so tests that call ``apply_tesseract`` without naming a transport also cover the
-default picking it up. All tests are marked ``gpu``, and the fixture skips where
-no CUDA GPU is available.
+default picking it up. The ``local_*`` tests load the same Tesseract in-process,
+where a named transport hands its endpoints CUDA tensors as they are. All tests
+are marked ``gpu``, and the fixtures skip where no CUDA GPU is available.
 """
 
 from __future__ import annotations
@@ -196,3 +197,67 @@ def test_grad_with_nondiff_array_input(served_gpu_tesseract):
     np.testing.assert_allclose(
         a.grad.cpu().numpy(), np.full((n,), 2.0 * 3.0), rtol=1e-6
     )
+
+
+@pytest.mark.parametrize(
+    ("gpu_transport", "received_type"),
+    [(None, np.ndarray), ("cuda_ipc", torch.Tensor)],
+)
+def test_local_client_receives_cuda_tensors_with_named_transport(
+    local_gpu_tesseract, monkeypatch, gpu_transport, received_type
+):
+    """An in-process client gets CUDA tensors as-is only when given a transport.
+
+    It advertises none, so by default its endpoint sees host NumPy arrays. Either
+    way the endpoint computes on the GPU, so the output alone cannot tell the two
+    apart, and the payload the client receives is checked instead.
+    """
+    client = local_gpu_tesseract._client
+    received = []
+    run_tesseract = client.run_tesseract
+
+    def recording_run_tesseract(endpoint, payload=None, *args, **kwargs):
+        if endpoint == "apply":
+            received.append(payload["inputs"]["a"])
+        return run_tesseract(endpoint, payload, *args, **kwargs)
+
+    monkeypatch.setattr(client, "run_tesseract", recording_run_tesseract)
+
+    a = torch.arange(8, dtype=torch.float32, device="cuda")
+    b = torch.ones(8, dtype=torch.float32, device="cuda")
+    out = apply_tesseract(
+        local_gpu_tesseract, {"a": a, "b": b}, gpu_transport=gpu_transport
+    )
+
+    assert isinstance(received[0], received_type)
+    if received_type is torch.Tensor:
+        assert received[0].is_cuda
+    np.testing.assert_allclose(
+        out["c"].cpu().numpy(), a.cpu().numpy() * 2.0 + 1.0, rtol=1e-6
+    )
+
+
+def test_local_client_derivatives_with_named_transport(local_gpu_tesseract):
+    """Vjp and jvp of an in-process client given a transport stay on-device."""
+    import torch.autograd.forward_ad as fwAD
+
+    n = 64
+    a = torch.arange(n, dtype=torch.float32, device="cuda", requires_grad=True)
+    b = torch.ones(n, dtype=torch.float32, device="cuda")
+
+    out = apply_tesseract(
+        local_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
+    )
+    out["c"].sum().backward()
+    assert a.grad.is_cuda
+    np.testing.assert_allclose(a.grad.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
+
+    with fwAD.dual_level():
+        a_dual = fwAD.make_dual(a.detach(), torch.ones_like(b))
+        b_dual = fwAD.make_dual(b, torch.zeros_like(b))
+        out = apply_tesseract(
+            local_gpu_tesseract, {"a": a_dual, "b": b_dual}, gpu_transport="cuda_ipc"
+        )
+        _primal, tangent = fwAD.unpack_dual(out["c"])
+    assert tangent.is_cuda
+    np.testing.assert_allclose(tangent.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)

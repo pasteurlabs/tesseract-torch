@@ -240,8 +240,8 @@ def test_explicit_host_roundtrip_overrides_the_tesseract_transport():
     assert _resolve_gpu_transport(tess, "none") == "none"
 
 
-def test_named_transport_is_dropped_for_local_client(vectoradd_tess):
-    assert _resolve_gpu_transport(vectoradd_tess, "cuda_ipc") == "none"
+def test_named_transport_is_kept_for_local_client(vectoradd_tess):
+    assert _resolve_gpu_transport(vectoradd_tess, "cuda_ipc") == "cuda_ipc"
 
 
 def test_gpu_transport_mode_is_noop_for_local_client_shaped_object():
@@ -323,13 +323,12 @@ def test_gpu_transport_mode_restores_on_exception():
     assert tess._client._session.headers["Accept"] == prior_accept
 
 
-def test_gpu_transport_is_noop_for_local_client(vectoradd_tess):
-    """``gpu_transport`` against a LocalClient must behave as without it.
+def test_gpu_transport_leaves_cpu_tensors_alone_for_local_client(vectoradd_tess):
+    """Naming a transport for a LocalClient leaves CPU tensors on the host path.
 
     tests/vectoradd_tesseract is loaded via ``from_tesseract_api``, i.e. an
-    in-process LocalClient that already shares memory, so
-    ``_resolve_gpu_transport`` drops the request. This confirms that doesn't
-    break the ordinary CPU path.
+    in-process LocalClient. The transport only changes how CUDA tensors reach
+    it, so its NumPy-based endpoint still works with CPU tensors.
     """
     a = torch.tensor([1.0, 2.0, 3.0])
     b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
@@ -346,21 +345,4 @@ class TestCudaTensorWithoutDeviceTransport:
         a = torch.tensor([1.0, 2.0, 3.0], device="cuda")
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
-        assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))
-
-    def test_cuda_tensor_forward_with_gpu_transport_on_local_client(
-        self, vectoradd_tess
-    ):
-        """``gpu_transport`` against a LocalClient must still host-copy.
-
-        ``_resolve_gpu_transport`` drops the request for a LocalClient, so the
-        CUDA tensor still takes the host round-trip. Passed through raw, it
-        would reach the in-process endpoint's NumPy-based code, which cannot
-        read GPU memory and would raise.
-        """
-        a = torch.tensor([1.0, 2.0, 3.0], device="cuda")
-        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-        result = apply_tesseract(
-            vectoradd_tess, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )
         assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))

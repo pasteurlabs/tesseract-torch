@@ -56,12 +56,9 @@ def _resolve_gpu_transport(tesseract: Tesseract, gpu_transport: str | None) -> s
 
     ``None`` selects ``_DEFAULT_GPU_TRANSPORT`` if the Tesseract advertises it in
     ``supported_gpu_transports``, else ``"none"``. A named transport is used as
-    given even if the Tesseract advertises nothing, because a plain ``from_url``
-    client cannot advertise one. A client that fails
-    :func:`_supports_gpu_transport` always gets ``"none"``.
+    given even if the Tesseract advertises nothing, because neither a plain
+    ``from_url`` client nor an in-process one can advertise one.
     """
-    if not _supports_gpu_transport(tesseract):
-        return "none"
     if gpu_transport is None:
         if _DEFAULT_GPU_TRANSPORT in tesseract.supported_gpu_transports:
             return _DEFAULT_GPU_TRANSPORT
@@ -82,13 +79,11 @@ def _validate_vmap_method(vmap_method: str | None) -> None:
 
 
 def _supports_gpu_transport(tesseract: Tesseract) -> bool:
-    """Whether ``tesseract``'s client can be switched to a device transport.
+    """Whether ``tesseract``'s client has a wire encoding to switch.
 
-    True only for an ``HTTPClient`` (has ``_gpu_transport``) -- e.g.
-    ``LocalClient`` already shares process memory and has no device-transport
-    concept, so a CUDA tensor handed to it raw would reach its in-process
-    endpoint code untouched and fail there instead of being exported by IPC
-    handle.
+    True only for an ``HTTPClient`` (has ``_gpu_transport``). An in-process
+    ``LocalClient`` encodes nothing: a device transport means its endpoints
+    receive CUDA tensors as they are.
     """
     client = getattr(tesseract, "_client", None)
     return client is not None and hasattr(client, "_gpu_transport")
@@ -866,11 +861,13 @@ def apply_tesseract(
             or ``from_source(..., gpu_transport="cuda_ipc")`` does, and a host
             round-trip otherwise. ``"none"`` sends CUDA tensors through a host
             round-trip like CPU tensors, in both directions, even if the
-            Tesseract was created with a transport. Transports only apply to a
-            served Tesseract (``HTTPClient``) with GPU access, and have no
-            effect on CPU tensors, NumPy inputs, or an in-process client, which
-            already shares memory. For ``cuda_ipc`` both processes must share
-            the CUDA IPC namespace (Docker's ``--ipc=host``). This is an
+            Tesseract was created with a transport. Transports have no effect
+            on CPU tensors or NumPy inputs. A served Tesseract needs GPU access,
+            and for ``cuda_ipc`` both processes must share the CUDA IPC
+            namespace (Docker's ``--ipc=host``). An in-process client advertises
+            no transport, so it takes the host round-trip by default. Naming one
+            passes CUDA tensors to its endpoints as they are, and the endpoints
+            must then handle device arrays (e.g. compute with torch). This is an
             experimental tesseract-core feature (see
             ``tesseract_core.runtime.cuda.ipc``).
         vmap_method: How the call is batched under ``torch.vmap``. ``None``
