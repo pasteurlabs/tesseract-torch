@@ -4,13 +4,17 @@
 """End-to-end tests of ``apply_tesseract`` over the ``cuda_ipc`` transport.
 
 The ``served_gpu_tesseract`` fixture is created with ``gpu_transport="cuda_ipc"``,
-so tests that call ``apply_tesseract`` without naming a transport also cover the
-default picking it up. The ``local_*`` tests load the same Tesseract in-process,
-where a named transport hands its endpoints CUDA tensors as they are. All tests
-are marked ``gpu``, and the fixtures skip where no CUDA GPU is available.
+which ``apply_tesseract`` uses for CUDA tensors. The ``local_*`` tests load the
+same Tesseract in-process, where one created with ``gpu_transport="cuda_ipc"``
+hands its endpoints CUDA tensors as they are. All tests are marked ``gpu``, and
+the fixtures skip where no CUDA GPU is available.
 """
 
 from __future__ import annotations
+
+import sys
+import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -37,30 +41,36 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
 def test_apply_matches_host_path(served_gpu_tesseract):
     """The cuda_ipc path must match the host-copy path exactly.
 
-    ``gpu_transport="none"`` overrides the transport the Tesseract was created
-    with, in both directions, so the baseline comes back as a host tensor.
+    A view requesting ``gpu_transport="none"`` overrides the transport the
+    Tesseract was created with, in both directions. Which transport a call
+    uses must not change its result, so both outputs land on the input's
+    device, and the non-differentiable one is a NumPy array either way.
     """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
 
-    ipc = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
-    host = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="none"
-    )["c"]
+    ipc = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
+    host_view = served_gpu_tesseract.with_encoding(gpu_transport="none")
+    host = apply_tesseract(host_view, {"a": a, "b": b})
 
-    assert ipc.is_cuda
-    assert not host.is_cuda
-    np.testing.assert_array_equal(ipc.cpu().numpy(), host.numpy())
+    assert ipc["c"].is_cuda and host["c"].is_cuda
+    np.testing.assert_array_equal(ipc["c"].cpu().numpy(), host["c"].cpu().numpy())
+    assert isinstance(ipc["c_sum"], np.ndarray)
+    assert isinstance(host["c_sum"], np.ndarray)
+    np.testing.assert_array_equal(ipc["c_sum"], host["c_sum"])
 
 
-def test_explicit_transport_on_client_without_one(served_gpu_tesseract):
-    """A plain ``from_url`` client advertises no transport but can name one."""
+def test_from_url_client_uses_cuda_ipc_once_checked(served_gpu_tesseract):
+    """A plain ``from_url`` client requests no transport, but uses cuda_ipc once it checked it works."""
     a = torch.arange(8, dtype=torch.float32, device="cuda")
     b = torch.ones(8, dtype=torch.float32, device="cuda")
 
     with Tesseract.from_url(served_gpu_tesseract._client.url) as tess:
-        assert tess.supported_gpu_transports == ()
-        out = apply_tesseract(tess, {"a": a, "b": b}, gpu_transport="cuda_ipc")
+        assert tess.current_encoding.gpu_transport is None
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert tess.resolve_gpu_transport() == "cuda_ipc"
+        out = apply_tesseract(tess, {"a": a, "b": b})
 
     assert out["c"].is_cuda
     np.testing.assert_allclose(
@@ -200,18 +210,22 @@ def test_grad_with_nondiff_array_input(served_gpu_tesseract):
 
 
 @pytest.mark.parametrize(
-    ("gpu_transport", "received_type"),
-    [(None, np.ndarray), ("cuda_ipc", torch.Tensor)],
+    ("tess_fixture", "received_type"),
+    [
+        ("local_gpu_tesseract", np.ndarray),
+        ("local_cuda_ipc_gpu_tesseract", torch.Tensor),
+    ],
 )
-def test_local_client_receives_cuda_tensors_with_named_transport(
-    local_gpu_tesseract, monkeypatch, gpu_transport, received_type
+def test_local_client_receives_cuda_tensors_if_created_with_transport(
+    request, monkeypatch, tess_fixture, received_type
 ):
-    """An in-process client gets CUDA tensors as-is only when given a transport.
+    """An in-process client gets CUDA tensors as-is only if created with a transport.
 
-    It advertises none, so by default its endpoint sees host NumPy arrays. Either
-    way the endpoint computes on the GPU, so the output alone cannot tell the two
-    apart, and the payload the client receives is checked instead.
+    Otherwise its endpoint sees host NumPy arrays. Either way the endpoint
+    computes on the GPU, so the output alone cannot tell the two apart, and the
+    payload the client receives is checked instead.
     """
+    local_gpu_tesseract = request.getfixturevalue(tess_fixture)
     client = local_gpu_tesseract._client
     received = []
     run_tesseract = client.run_tesseract
@@ -225,10 +239,9 @@ def test_local_client_receives_cuda_tensors_with_named_transport(
 
     a = torch.arange(8, dtype=torch.float32, device="cuda")
     b = torch.ones(8, dtype=torch.float32, device="cuda")
-    out = apply_tesseract(
-        local_gpu_tesseract, {"a": a, "b": b}, gpu_transport=gpu_transport
-    )
+    out = apply_tesseract(local_gpu_tesseract, {"a": a, "b": b})
 
+    assert out["c"].is_cuda
     assert isinstance(received[0], received_type)
     if received_type is torch.Tensor:
         assert received[0].is_cuda
@@ -237,17 +250,16 @@ def test_local_client_receives_cuda_tensors_with_named_transport(
     )
 
 
-def test_local_client_derivatives_with_named_transport(local_gpu_tesseract):
-    """Vjp and jvp of an in-process client given a transport stay on-device."""
+def test_local_client_derivatives_with_transport(local_cuda_ipc_gpu_tesseract):
+    """Vjp and jvp of an in-process client created with a transport stay on-device."""
+    local_gpu_tesseract = local_cuda_ipc_gpu_tesseract
     import torch.autograd.forward_ad as fwAD
 
     n = 64
     a = torch.arange(n, dtype=torch.float32, device="cuda", requires_grad=True)
     b = torch.ones(n, dtype=torch.float32, device="cuda")
 
-    out = apply_tesseract(
-        local_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-    )
+    out = apply_tesseract(local_gpu_tesseract, {"a": a, "b": b})
     out["c"].sum().backward()
     assert a.grad.is_cuda
     np.testing.assert_allclose(a.grad.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
@@ -255,9 +267,43 @@ def test_local_client_derivatives_with_named_transport(local_gpu_tesseract):
     with fwAD.dual_level():
         a_dual = fwAD.make_dual(a.detach(), torch.ones_like(b))
         b_dual = fwAD.make_dual(b, torch.zeros_like(b))
-        out = apply_tesseract(
-            local_gpu_tesseract, {"a": a_dual, "b": b_dual}, gpu_transport="cuda_ipc"
-        )
+        out = apply_tesseract(local_gpu_tesseract, {"a": a_dual, "b": b_dual})
         _primal, tangent = fwAD.unpack_dual(out["c"])
     assert tangent.is_cuda
     np.testing.assert_allclose(tangent.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
+
+
+def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
+    """A Tesseract offering cuda_ipc that does not work gets host copies, with a warning.
+
+    Hiding the GPU from the server stands in for every reason cuda_ipc can fail,
+    e.g. a server on another host. A ``from_url`` client, which requests no
+    transport, falls back to host copies and still returns its outputs on the
+    input's device, while the client that requested cuda_ipc gets an error
+    instead of a silent host copy.
+    """
+    api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
+    # Only the server is spawned without the GPU. The test process reads
+    # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
+    with monkeypatch.context() as m:
+        m.setenv("CUDA_VISIBLE_DEVICES", "")
+        served = Tesseract.from_source(
+            api_path, python_executable=sys.executable, gpu_transport="cuda_ipc"
+        )
+        served.serve()
+    try:
+        remote = Tesseract.from_url(served._client.url)
+        a = torch.arange(8, dtype=torch.float32, device="cuda", requires_grad=True)
+        b = torch.ones(8, dtype=torch.float32, device="cuda")
+        with pytest.warns(UserWarning, match="copied to the host instead"):
+            out = apply_tesseract(remote, {"a": a, "b": b})
+        assert out["c"].is_cuda
+        np.testing.assert_allclose(out["c"].detach().cpu().numpy(), np.arange(8) + 1.0)
+        out["c"].sum().backward()
+        assert a.grad.is_cuda
+        np.testing.assert_allclose(a.grad.cpu().numpy(), np.ones(8))
+
+        with pytest.raises(RuntimeError, match="does not work between"):
+            apply_tesseract(served, {"a": a, "b": b})
+    finally:
+        served.teardown()

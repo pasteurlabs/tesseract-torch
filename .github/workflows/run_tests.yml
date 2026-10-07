@@ -79,7 +79,13 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Show GPU info
-        run: nvidia-smi
+        run: |
+          nvidia-smi
+          # Confirm Docker can see the GPU via the NVIDIA container runtime; the
+          # GPU tests serve a Tesseract from a container, so a broken runtime
+          # must fail loudly here.
+          docker info
+          docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7

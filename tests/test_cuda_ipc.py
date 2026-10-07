@@ -1,47 +1,37 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the device-transport fast path (``apply_tesseract(..., gpu_transport=...)``).
+"""Tests for how ``apply_tesseract`` picks and drives a GPU transport.
 
-These exercise the pure-Python plumbing (the ``_gpu_transport_mode`` client
-toggle, the transport-name validation, and the ``_to_tensor`` decode gate)
-without needing a GPU or a served Tesseract. Full end-to-end coverage (a real
-``HTTPClient`` talking CUDA IPC to a served GPU Tesseract) lives in ``test_gpu_direct``
-and tesseract-core's own suite; here we only need to verify tesseract-torch
-drives that API correctly.
+These exercise the pure-Python plumbing (which transport a call uses, when it
+goes through an encoding view, and the ``_to_tensor`` decode gate) without
+needing a GPU. Full end-to-end coverage (a real ``HTTPClient`` talking CUDA IPC
+to a served GPU Tesseract) lives in ``test_gpu_direct`` and tesseract-core's own
+suite; here we only need to verify tesseract-torch drives that API correctly.
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 from tesseract_core import Tesseract
-from tesseract_core.sdk.tesseract import HTTPClient
 
 from tesseract_torch import apply_tesseract
 from tesseract_torch.function import (
-    _gpu_transport_mode,
     _resolve_gpu_transport,
-    _supports_gpu_transport,
     _tensor_to_numpy_or_cuda,
     _to_tensor,
-    _validate_gpu_transport,
+    _with_gpu_transport,
 )
 
 
-def _fake_tesseract(client: object | None) -> Tesseract:
-    """A ``Tesseract`` instance with an arbitrary (possibly fake) ``_client``.
-
-    Bypasses ``__init__`` (which warns that direct construction is deprecated
-    and always builds a real ``HTTPClient``) since these tests only need a
-    real ``Tesseract`` *instance* -- for the typeguard-checked
-    ``_gpu_transport_mode(tesseract: Tesseract)`` annotation -- with a
-    specific, possibly non-``HTTPClient``, ``_client`` swapped in.
-    """
-    tess = object.__new__(Tesseract)
-    tess._client = client
-    return tess
+@pytest.fixture
+def vectoradd_api_path() -> Path:
+    return Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
 
 
 def test_to_tensor_numpy_roundtrip():
@@ -156,184 +146,57 @@ def test_tensor_to_numpy_or_cuda_rejects_functional_tensors():
         func.grad(f)(torch.tensor(1.0))
 
 
-def test_validate_gpu_transport_accepts_cuda_ipc():
-    _validate_gpu_transport("cuda_ipc")
+def test_cpu_tensors_take_the_host_path(vectoradd_api_path):
+    """Only a call with CUDA tensors asks the Tesseract for a transport.
 
-
-def test_validate_gpu_transport_accepts_none():
-    _validate_gpu_transport(None)
-
-
-def test_validate_gpu_transport_accepts_explicit_host_roundtrip():
-    _validate_gpu_transport("none")
-
-
-def test_validate_gpu_transport_rejects_unsupported():
-    """An unsupported name is rejected up front.
-
-    It would otherwise route into the cuda_ipc-specific path and send an
-    ``Accept`` the server has no backend for.
+    CPU tensors have nothing to keep on a device, so even a Tesseract that
+    accepts GPU arrays gets them as NumPy arrays, and its NumPy-based endpoint
+    works with them.
     """
-    with pytest.raises(ValueError, match="Unsupported gpu_transport"):
-        _validate_gpu_transport("nixl")
+    tess = Tesseract.from_tesseract_api(vectoradd_api_path, gpu_transport="cuda_ipc")
+    assert _resolve_gpu_transport(tess, torch.device("cpu")) == "none"
+    assert _resolve_gpu_transport(tess, torch.device("cuda")) == "cuda_ipc"
 
-
-def test_apply_tesseract_rejects_unsupported_transport(vectoradd_tess):
     a = torch.tensor([1.0, 2.0, 3.0])
     b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-    with pytest.raises(ValueError, match="Unsupported gpu_transport"):
-        apply_tesseract(vectoradd_tess, {"a": a, "b": b}, gpu_transport="nixl")
-
-
-def _fake_http_client(gpu_transport: str = "none") -> HTTPClient:
-    """A real ``HTTPClient`` that never talks to the network in these tests.
-
-    ``HTTPClient.__init__`` only sets attributes and opens a ``requests.Session``
-    (no connection), so this is cheap and side-effect-free.
-    """
-    return HTTPClient("http://fake-tesseract.invalid", gpu_transport=gpu_transport)
-
-
-def test_supports_gpu_transport_true_for_http_client():
-    tess = _fake_tesseract(client=_fake_http_client())
-    assert _supports_gpu_transport(tess) is True
-
-
-def test_supports_gpu_transport_false_for_local_client_shaped_object():
-    """A client without ``_gpu_transport`` (e.g. LocalClient) is unsupported."""
-    tess = _fake_tesseract(client=object())
-    assert _supports_gpu_transport(tess) is False
-
-
-def test_supports_gpu_transport_false_when_no_client():
-    tess = _fake_tesseract(client=None)
-    assert _supports_gpu_transport(tess) is False
-
-
-def test_default_uses_the_transport_the_tesseract_was_created_with():
-    tess = _fake_tesseract(client=_fake_http_client("cuda_ipc"))
-    assert _resolve_gpu_transport(tess, None) == "cuda_ipc"
-
-
-def test_default_is_host_roundtrip_for_client_without_transport():
-    tess = _fake_tesseract(client=_fake_http_client())
-    assert _resolve_gpu_transport(tess, None) == "none"
-
-
-def test_default_ignores_transports_tesseract_torch_lacks():
-    tess = _fake_tesseract(client=_fake_http_client("nixl"))
-    assert _resolve_gpu_transport(tess, None) == "none"
-
-
-def test_default_is_host_roundtrip_for_local_client(vectoradd_tess):
-    assert _resolve_gpu_transport(vectoradd_tess, None) == "none"
-
-
-def test_named_transport_works_on_client_without_one():
-    """A plain ``from_url`` client advertises no transport but can name one."""
-    tess = _fake_tesseract(client=_fake_http_client())
-    assert _resolve_gpu_transport(tess, "cuda_ipc") == "cuda_ipc"
-
-
-def test_explicit_host_roundtrip_overrides_the_tesseract_transport():
-    tess = _fake_tesseract(client=_fake_http_client("cuda_ipc"))
-    assert _resolve_gpu_transport(tess, "none") == "none"
-
-
-def test_named_transport_is_kept_for_local_client(vectoradd_tess):
-    assert _resolve_gpu_transport(vectoradd_tess, "cuda_ipc") == "cuda_ipc"
-
-
-def test_gpu_transport_mode_is_noop_for_local_client_shaped_object():
-    client = object()
-    tess = _fake_tesseract(client=client)
-    with _gpu_transport_mode(tess, "none"):
-        assert tess._client is client
-
-
-def test_gpu_transport_mode_forces_host_roundtrip():
-    """``"none"`` asks for host outputs too, overriding the server's config."""
-    tess = _fake_tesseract(client=_fake_http_client("cuda_ipc"))
-    with _gpu_transport_mode(tess, "none"):
-        assert tess._client._gpu_transport == "none"
-        assert (
-            tess._client._session.headers["Accept"]
-            == "application/json+base64; gpu_transport=none"
-        )
-    assert tess._client._gpu_transport == "cuda_ipc"
-
-
-def test_gpu_transport_mode_toggles_and_restores_http_client():
-    """The toggle flips the GPU transport on and restores it (and the header).
-
-    A fresh ``HTTPClient``'s ``requests.Session`` always has a default
-    ``Accept: */*`` header, so the "prior" value the toggle restores is that
-    default, not an absent header.
-    """
-    tess = _fake_tesseract(client=_fake_http_client())
-    prior_accept = tess._client._session.headers["Accept"]
-    with _gpu_transport_mode(tess, "cuda_ipc"):
-        assert tess._client._gpu_transport == "cuda_ipc"
-        assert (
-            tess._client._session.headers["Accept"]
-            == "application/json+base64; gpu_transport=cuda_ipc"
-        )
-    assert tess._client._gpu_transport == "none"
-    assert tess._client._session.headers["Accept"] == prior_accept
-
-
-def test_gpu_transport_mode_accept_reuses_output_format():
-    """The Accept media type carries the client's live ``_output_format``.
-
-    GPU transport is a separate axis from the CPU-array output format, so a
-    non-default format (e.g. ``json+binref``) must be preserved in the header
-    rather than replaced with ``json+base64``.
-    """
-    client = _fake_http_client()
-    client._output_format = "json+binref"
-    tess = _fake_tesseract(client=client)
-    with _gpu_transport_mode(tess, "cuda_ipc"):
-        assert (
-            client._session.headers["Accept"]
-            == "application/json+binref; gpu_transport=cuda_ipc"
-        )
-
-
-def test_gpu_transport_mode_preserves_prior_accept_header():
-    client = _fake_http_client()
-    client._session.headers["Accept"] = "application/json+base64"
-    tess = _fake_tesseract(client=client)
-    with _gpu_transport_mode(tess, "cuda_ipc"):
-        assert (
-            client._session.headers["Accept"]
-            == "application/json+base64; gpu_transport=cuda_ipc"
-        )
-    assert client._session.headers["Accept"] == "application/json+base64"
-
-
-def test_gpu_transport_mode_restores_on_exception():
-    tess = _fake_tesseract(client=_fake_http_client())
-    prior_accept = tess._client._session.headers["Accept"]
-    with (
-        pytest.raises(ValueError, match="boom"),
-        _gpu_transport_mode(tess, "cuda_ipc"),
-    ):
-        raise ValueError("boom")
-    assert tess._client._gpu_transport == "none"
-    assert tess._client._session.headers["Accept"] == prior_accept
-
-
-def test_gpu_transport_leaves_cpu_tensors_alone_for_local_client(vectoradd_tess):
-    """Naming a transport for a LocalClient leaves CPU tensors on the host path.
-
-    tests/vectoradd_tesseract is loaded via ``from_tesseract_api``, i.e. an
-    in-process LocalClient. The transport only changes how CUDA tensors reach
-    it, so its NumPy-based endpoint still works with CPU tensors.
-    """
-    a = torch.tensor([1.0, 2.0, 3.0])
-    b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-    result = apply_tesseract(vectoradd_tess, {"a": a, "b": b}, gpu_transport="cuda_ipc")
+    result = apply_tesseract(tess, {"a": a, "b": b})
     assert torch.allclose(result["c"], torch.tensor([5.0, 7.0, 9.0]))
+
+
+def test_in_process_transport_is_the_one_it_was_created_with(vectoradd_tess):
+    assert _resolve_gpu_transport(vectoradd_tess, torch.device("cuda")) == "none"
+
+
+def test_unsupported_transport_is_rejected(vectoradd_api_path, monkeypatch):
+    """A transport the GPU path cannot drive must not be sent CUDA tensors."""
+    tess = Tesseract.from_tesseract_api(vectoradd_api_path)
+    monkeypatch.setattr(tess, "resolve_gpu_transport", lambda: "nixl")
+    with pytest.raises(ValueError, match="tesseract-torch cannot drive"):
+        _resolve_gpu_transport(tess, torch.device("cuda"))
+
+
+def test_with_gpu_transport_views_only_when_needed(vectoradd_api_path):
+    """A call uses the Tesseract itself unless it needs another transport.
+
+    Served with cuda_ipc, a call that needs ``"none"`` goes through a view
+    requesting it, and every other combination through the Tesseract itself.
+    """
+    in_process = Tesseract.from_tesseract_api(vectoradd_api_path)
+    assert _with_gpu_transport(in_process, "cuda_ipc") is in_process
+
+    with Tesseract.from_source(
+        vectoradd_api_path, python_executable=sys.executable, gpu_transport="cuda_ipc"
+    ) as served:
+        assert _with_gpu_transport(served, "cuda_ipc") is served
+        host = _with_gpu_transport(served, "none")
+        assert host is not served
+        assert host.current_encoding.gpu_transport == "none"
+
+        remote = Tesseract.from_url(served._client.url)
+        assert _with_gpu_transport(remote, "none") is remote
+        assert _with_gpu_transport(
+            remote, "cuda_ipc"
+        ).current_encoding.gpu_transport == ("cuda_ipc")
 
 
 @pytest.mark.gpu
@@ -342,7 +205,9 @@ class TestCudaTensorWithoutDeviceTransport:
     """Without a device transport, CUDA tensors still take the host round-trip."""
 
     def test_cuda_tensor_forward_default(self, vectoradd_tess):
+        """The output still lands on the input's device."""
         a = torch.tensor([1.0, 2.0, 3.0], device="cuda")
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
+        assert result["c"].is_cuda
         assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))
