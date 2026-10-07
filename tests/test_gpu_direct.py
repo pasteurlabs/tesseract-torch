@@ -282,6 +282,8 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
     input's device, while the client that requested cuda_ipc gets an error
     instead of a silent host copy.
     """
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA GPU available")
     api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
     # Only the server is spawned without the GPU. The test process reads
     # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
