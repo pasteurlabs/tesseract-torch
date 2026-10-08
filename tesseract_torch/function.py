@@ -110,27 +110,62 @@ def _place_nondiff_arrays(value: Any, device: torch.device) -> Any:
     In a call with CUDA tensors they become tensors on ``device``, like the
     differentiable outputs, so a device array the transport delivered stays on
     the device. Otherwise they are NumPy arrays. Either way the result does not
-    depend on the transport the call used. Tensors an in-process endpoint
-    returns are left alone.
+    depend on the transport the call used, nor on whether an in-process
+    endpoint returned tensors. A NumPy array of a dtype no tensor can hold,
+    such as strings, stays a NumPy array.
     """
     if isinstance(value, dict):
         return {key: _place_nondiff_arrays(item, device) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        return type(value)(_place_nondiff_arrays(item, device) for item in value)
-    if isinstance(value, torch.Tensor):
-        return value
+        items = (_place_nondiff_arrays(item, device) for item in value)
+        # A namedtuple takes its fields as separate arguments.
+        return type(value)(*items) if hasattr(value, "_fields") else type(value)(items)
+    is_tensor = isinstance(value, torch.Tensor)
     is_device_array = hasattr(value, "__cuda_array_interface__")
     if device.type == "cuda":
-        if is_device_array or isinstance(value, np.ndarray | np.generic):
+        if is_tensor or is_device_array or _tensor_can_hold(value):
             return _to_tensor(value).to(device)
         return value
-    if is_device_array:
-        return _to_tensor(value).cpu().numpy()
+    if is_tensor or is_device_array:
+        return _to_tensor(value).detach().cpu().resolve_conj().resolve_neg().numpy()
     return value
+
+
+# NumPy dtypes a tensor can hold, in native byte order.
+_TENSOR_DTYPES = frozenset(
+    np.dtype(name)
+    for name in (
+        "bool",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float16",
+        "float32",
+        "float64",
+        "complex64",
+        "complex128",
+    )
+)
+
+
+def _tensor_can_hold(value: Any) -> bool:
+    """Whether ``value`` is a NumPy array or scalar that converts to a tensor."""
+    return (
+        isinstance(value, np.ndarray | np.generic)
+        and value.dtype.newbyteorder("=") in _TENSOR_DTYPES
+    )
 
 
 def _to_tensor(arr: Any) -> torch.Tensor:
     """Convert a decoded Tesseract array to a tensor, copying if read-only.
+
+    A NumPy array in non-native byte order is copied into native order, which
+    is the only one tensors use.
 
     ``arr`` is a NumPy array (host encodings) or an ``IpcDeviceArray``
     (``cuda_ipc`` encoding, a fresh device buffer owned by this process,
@@ -148,34 +183,36 @@ def _to_tensor(arr: Any) -> torch.Tensor:
     if hasattr(arr, "__cuda_array_interface__"):
         return torch.utils.dlpack.from_dlpack(arr)
     a = np.asarray(arr)
-    if not a.flags.writeable:
+    if not a.dtype.isnative:
+        a = a.astype(a.dtype.newbyteorder("="))
+    elif not a.flags.writeable:
         a = a.copy()
     return torch.as_tensor(a)
 
 
 def _is_zero_or_none(t: torch.Tensor | None) -> bool:
-    """True for a missing or all-zero (co)tangent. NaN counts as nonzero."""
-    return t is None or not bool(t.any())
+    """True for a missing or all-zero (co)tangent. NaN counts as nonzero.
+
+    Checks for storage first, so that batched backward (``is_grads_batched``)
+    gets the error about torch.func rather than ``any()`` failing on a missing
+    batching rule.
+    """
+    if t is None:
+        return True
+    _require_storage(t)
+    return not bool(t.any())
 
 
-def _tensor_to_numpy_or_cuda(t: torch.Tensor, *, on_device: bool = False) -> Any:
-    """Convert a torch tensor to a numpy array, or pass a CUDA tensor through.
-
-    A CUDA tensor already exposes ``__cuda_array_interface__``, so when a device
-    transport is active for this call it can be handed to the Tesseract client
-    as-is and exported by IPC handle instead of copied to host. It must be
-    contiguous, since the transport moves a flat byte range with no strides.
-    Without a device transport, a CUDA tensor still needs the host copy below:
-    the client's default encoder calls ``np.asanyarray`` on it, which cannot
-    read GPU memory.
+def _require_storage(t: torch.Tensor) -> None:
+    """Raise an actionable error for a tensor no Tesseract can receive.
 
     torch.func transforms (vjp, jvp, grad) wrap tensors in a C++
-    FunctionalTensorWrapper that has no backing storage.  These tensors
-    report type(t)==torch.Tensor (no Python subclass), so there is no
-    isinstance check we can use.  Instead we probe data_ptr(), the same
-    public precondition that .numpy() relies on, to raise an actionable
-    error instead of the confusing default message ("Cannot access data
-    pointer of Tensor that doesn't have storage").
+    FunctionalTensorWrapper that has no backing storage, and so does batched
+    backward.  These tensors report type(t)==torch.Tensor (no Python
+    subclass), so there is no isinstance check we can use.  Instead we probe
+    data_ptr(), the same public precondition that .numpy() relies on, to
+    raise an actionable error instead of the confusing default message
+    ("Cannot access data pointer of Tensor that doesn't have storage").
     """
     try:
         t.data_ptr()
@@ -187,9 +224,31 @@ def _tensor_to_numpy_or_cuda(t: torch.Tensor, *, on_device: bool = False) -> Any
             "  - Reverse mode: result['y'].backward() or torch.autograd.grad()\n"
             "  - Forward mode: torch.autograd.forward_ad (dual tensors)"
         ) from None
+
+
+def _tensor_to_numpy_or_cuda(
+    t: torch.Tensor, *, on_device: bool = False, dtype: torch.dtype | None = None
+) -> Any:
+    """Convert a torch tensor to a numpy array, or pass a CUDA tensor through.
+
+    A CUDA tensor already exposes ``__cuda_array_interface__``, so when a device
+    transport is active for this call it can be handed to the Tesseract client
+    as-is and exported by IPC handle instead of copied to host. It must be
+    contiguous, since the transport moves a flat byte range with no strides,
+    and of the *dtype* the schema declares, if given, since the transport
+    does not cast on the device the way the host path casts on decode.
+    Without a device transport, a CUDA tensor still needs the host copy below:
+    the client's default encoder calls ``np.asanyarray`` on it, which cannot
+    read GPU memory.
+
+    Negative and conjugate views are resolved first, since neither NumPy nor
+    the transport can represent the lazy bit.
+    """
+    _require_storage(t)
+    t = t.detach().resolve_conj().resolve_neg()
     if on_device and t.is_cuda:
-        return t.detach().contiguous()
-    return t.detach().cpu().numpy()
+        return (t if dtype is None else t.to(dtype)).contiguous()
+    return t.cpu().numpy()
 
 
 def _get_differentiable_arrays(
@@ -199,6 +258,21 @@ def _get_differentiable_arrays(
     """Extract differentiable array dotted-paths from the OpenAPI schema."""
     schema = openapi_schema["components"]["schemas"].get(component, {})
     return set(schema.get("differentiable_arrays", {}))
+
+
+def _declared_dtype(
+    openapi_schema: dict, component: str, concrete_parts: KeyType
+) -> torch.dtype | None:
+    """The dtype the OpenAPI schema declares for a differentiable leaf, if any.
+
+    ``None`` when the declared dtype is not one torch has.
+    """
+    schema = openapi_schema["components"]["schemas"].get(component, {})
+    for template, spec in schema.get("differentiable_arrays", {}).items():
+        if _wire_name(concrete_parts, {template}) is not None:
+            dtype = getattr(torch, str(spec.get("dtype")), None)
+            return dtype if isinstance(dtype, torch.dtype) else None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +494,9 @@ class _DispatchParams:
         tensor_paths: Input path of each tensor argument, the differentiable
             ones first.
         diff_input_wires: Wire name of each differentiable tensor argument.
+        tensor_dtypes: Dtype the schema declares for each tensor argument, or
+            ``None`` where it declares none. A device transport sends tensors
+            in it.
         diff_output_templates: Declared paths of the differentiable outputs.
         all_paths: Every declared differentiable path, to guide flattening.
         static_inputs: The input leaves that are not tensors.
@@ -431,6 +508,7 @@ class _DispatchParams:
     tesseract: Tesseract
     tensor_paths: list[KeyType]
     diff_input_wires: list[str]
+    tensor_dtypes: list[torch.dtype | None]
     diff_output_templates: list[str]
     all_paths: set[str]
     static_inputs: dict[KeyType, Any]
@@ -478,9 +556,13 @@ class _TesseractFunction(torch.autograd.Function):
         """
         tesseract = params.tesseract
         on_device = params.gpu_transport != "none"
-        flat_inputs = dict(params.static_inputs)
-        for path, tensor in zip(params.tensor_paths, tensors, strict=True):
-            flat_inputs[path] = _tensor_to_numpy_or_cuda(tensor, on_device=on_device)
+        flat_inputs = _flat_inputs(
+            params.static_inputs,
+            params.tensor_paths,
+            tensors,
+            params.tensor_dtypes,
+            on_device=on_device,
+        )
 
         result = _with_gpu_transport(tesseract, params.gpu_transport).apply(
             _unflatten_pytree(flat_inputs)
@@ -530,12 +612,19 @@ class _TesseractFunction(torch.autograd.Function):
             for tensor in tensors[: len(params.diff_input_wires)]
         ]
 
-        saved_inputs: dict[KeyType, Any] = dict(params.static_inputs)
-        for path, tensor in zip(params.tensor_paths, tensors, strict=True):
-            saved_inputs[path] = _tensor_to_numpy_or_cuda(
-                tensor, on_device=ctx.on_device
-            )
-        ctx.saved_inputs = saved_inputs
+        # Under a torch.func transform forward() sees unwrapped tensors and
+        # only these are wrapped, so this is where such a call is rejected.
+        for tensor in tensors:
+            _require_storage(tensor)
+        # backward() and jvp() rebuild the inputs from the saved tensors, so
+        # that autograd raises if one was modified in place in between rather
+        # than the Tesseract seeing the new values. jvp() can only read what
+        # save_for_forward() saved.
+        ctx.save_for_backward(*tensors)
+        ctx.save_for_forward(*tensors)
+        ctx.static_inputs = params.static_inputs
+        ctx.tensor_paths = params.tensor_paths
+        ctx.tensor_dtypes = params.tensor_dtypes
 
         # Output names are resolved in forward(), since a dict-valued output
         # has no concrete keys until apply() has returned.
@@ -553,6 +642,9 @@ class _TesseractFunction(torch.autograd.Function):
         *grad_outputs: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, ...]:
         """Reverse-mode AD via the Tesseract's VJP endpoint."""
+        # Raises if an input was modified in place since forward().
+        saved_tensors = ctx.saved_tensors
+
         # Request the VJP only for outputs with a nonzero cotangent. An unused
         # output arrives as None, and any output may arrive as all zeros.
         # Requesting either would compute and transport a gradient that is
@@ -590,7 +682,7 @@ class _TesseractFunction(torch.autograd.Function):
             vjp_result = _with_gpu_transport(
                 ctx.tesseract, ctx.gpu_transport
             ).vector_jacobian_product(
-                inputs=_unflatten_pytree(ctx.saved_inputs),
+                inputs=_unflatten_pytree(_saved_inputs(ctx, saved_tensors)),
                 vjp_inputs=needed_wires,
                 vjp_outputs=active_wires,
                 cotangent_vector=cotangent_vector,
@@ -609,6 +701,17 @@ class _TesseractFunction(torch.autograd.Function):
             else:
                 grad_inputs.append(None)
 
+        # Under create_graph=True autograd would treat these gradients as
+        # constants and silently drop the Tesseract's share of a higher-order
+        # derivative. Tie them to what they depend on so that differentiating
+        # them raises instead.
+        if torch.is_grad_enabled():
+            depends_on = [*saved_tensors, *(g for g in grad_outputs if g is not None)]
+            grad_inputs = [
+                g if g is None else _NotDifferentiableTwice.apply(g, *depends_on)
+                for g in grad_inputs
+            ]
+
         # Non-differentiable tensors follow the differentiable ones and get
         # no gradient.
         return (
@@ -626,13 +729,16 @@ class _TesseractFunction(torch.autograd.Function):
         tensor_tangents = tangents[
             _N_NON_TENSOR_ARGS : _N_NON_TENSOR_ARGS + len(ctx.diff_input_wires)
         ]
+        diff_dtypes = ctx.tensor_dtypes[: len(ctx.diff_input_wires)]
 
         # Request the JVP only for inputs with a nonzero tangent. Inputs sliced
         # from a one-hot-seeded dual tensor, as when building a Jacobian column
         # by column, arrive with all-zero tangents rather than None.
         tangent_vector = {
-            wire: _tensor_to_numpy_or_cuda(t, on_device=ctx.on_device)
-            for wire, t in zip(ctx.diff_input_wires, tensor_tangents, strict=True)
+            wire: _tensor_to_numpy_or_cuda(t, on_device=ctx.on_device, dtype=dtype)
+            for wire, t, dtype in zip(
+                ctx.diff_input_wires, tensor_tangents, diff_dtypes, strict=True
+            )
             if not _is_zero_or_none(t)
         }
         jvp_inputs = list(tangent_vector)
@@ -649,7 +755,7 @@ class _TesseractFunction(torch.autograd.Function):
         jvp_result = _with_gpu_transport(
             ctx.tesseract, ctx.gpu_transport
         ).jacobian_vector_product(
-            inputs=_unflatten_pytree(ctx.saved_inputs),
+            inputs=_unflatten_pytree(_saved_inputs(ctx, ctx.saved_tensors)),
             jvp_inputs=jvp_inputs,
             jvp_outputs=list(ctx.diff_output_wires),
             tangent_vector=tangent_vector,
@@ -729,6 +835,58 @@ class _TesseractFunction(torch.autograd.Function):
         ]
         output_tensors = tuple(batched[path] for path, _ in slot.outputs)
         return output_tensors, (0,) * len(output_tensors)
+
+
+class _NotDifferentiableTwice(torch.autograd.Function):
+    """Pass a gradient through, raising if anything differentiates it.
+
+    The extra inputs are only there to connect the gradient to the graph.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any, grad: torch.Tensor, *depends_on: torch.Tensor
+    ) -> torch.Tensor:
+        return grad
+
+    @staticmethod
+    def backward(ctx: Any, *grad_outputs: torch.Tensor) -> None:
+        raise RuntimeError(
+            "apply_tesseract does not support higher-order derivatives: a "
+            "Tesseract's vector_jacobian_product cannot itself be differentiated. "
+            "Gradients computed with create_graph=True can be used, but not "
+            "differentiated again."
+        )
+
+
+def _flat_inputs(
+    static_inputs: dict[KeyType, Any],
+    tensor_paths: list[KeyType],
+    tensors: Sequence[torch.Tensor],
+    tensor_dtypes: list[torch.dtype | None],
+    *,
+    on_device: bool,
+) -> dict[KeyType, Any]:
+    """The flat input leaves of a call, with tensors ready to send."""
+    flat_inputs = dict(static_inputs)
+    for path, tensor, dtype in zip(tensor_paths, tensors, tensor_dtypes, strict=True):
+        flat_inputs[path] = _tensor_to_numpy_or_cuda(
+            tensor, on_device=on_device, dtype=dtype
+        )
+    return flat_inputs
+
+
+def _saved_inputs(
+    ctx: Any, saved_tensors: Sequence[torch.Tensor]
+) -> dict[KeyType, Any]:
+    """The flat input leaves of the forward call, rebuilt from the saved tensors."""
+    return _flat_inputs(
+        ctx.static_inputs,
+        ctx.tensor_paths,
+        saved_tensors,
+        ctx.tensor_dtypes,
+        on_device=ctx.on_device,
+    )
 
 
 def _call_leaves(
@@ -929,6 +1087,7 @@ def apply_tesseract(
     # concrete leaf ``params.p`` and is addressed on the wire as ``params.{p}``.
     diff_paths: list[KeyType] = []
     diff_wires: list[str] = []
+    diff_dtypes: list[torch.dtype | None] = []
     diff_tensors: list[torch.Tensor] = []
     nondiff_paths: list[KeyType] = []
     nondiff_tensors: list[torch.Tensor] = []
@@ -941,6 +1100,7 @@ def apply_tesseract(
         if wire is not None:
             diff_paths.append(path)
             diff_wires.append(wire)
+            diff_dtypes.append(_declared_dtype(openapi, "ApplyInputSchema", path))
             diff_tensors.append(value)
         elif isinstance(value, torch.Tensor):
             nondiff_paths.append(path)
@@ -953,6 +1113,9 @@ def apply_tesseract(
         tesseract=tesseract,
         tensor_paths=diff_paths + nondiff_paths,
         diff_input_wires=diff_wires,
+        # The schema declares no dtype for a non-differentiable leaf in a
+        # form that can be read here.
+        tensor_dtypes=diff_dtypes + [None] * len(nondiff_tensors),
         diff_output_templates=diff_out_templates,
         all_paths=all_paths,
         static_inputs=static,

@@ -12,6 +12,7 @@ suite; here we only need to verify tesseract-torch drives that API correctly.
 
 from __future__ import annotations
 
+import collections
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from tesseract_core import Tesseract
 
 from tesseract_torch import apply_tesseract
 from tesseract_torch.function import (
+    _place_nondiff_arrays,
     _resolve_gpu_transport,
     _tensor_to_numpy_or_cuda,
     _to_tensor,
@@ -55,6 +57,13 @@ def test_to_tensor_readonly_numpy_array():
     t = _to_tensor(a)
     assert isinstance(t, torch.Tensor)
     assert torch.allclose(t, torch.tensor([1.0, 2.0]))
+
+
+def test_to_tensor_non_native_byte_order():
+    """Tensors only use native byte order, so a big-endian array is converted."""
+    a = np.arange(3, dtype=">f8")
+    t = _to_tensor(a)
+    assert torch.equal(t, torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64))
 
 
 def test_to_tensor_tensor_passthrough():
@@ -135,6 +144,34 @@ def test_tensor_to_numpy_or_cuda_cuda_tensor_on_device_passes_through():
     assert out.is_contiguous()
 
 
+def test_tensor_to_numpy_or_cuda_resolves_conjugate_views():
+    t = torch.tensor([1 + 2j, 3 - 4j]).conj()
+    assert t.is_conj()
+    np.testing.assert_array_equal(_tensor_to_numpy_or_cuda(t), [1 - 2j, 3 + 4j])
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tensor_to_numpy_or_cuda_resolves_views_on_device():
+    """A tensor exported by a device transport carries no negative or conjugate bit."""
+    t = torch.tensor([1 + 2j, 3 - 4j], device="cuda").conj()
+    out = _tensor_to_numpy_or_cuda(t, on_device=True)
+    assert not out.is_conj()
+    torch.testing.assert_close(out.cpu(), torch.tensor([1 - 2j, 3 + 4j]))
+    out = _tensor_to_numpy_or_cuda(t.imag, on_device=True)
+    assert not out.is_neg()
+    torch.testing.assert_close(out.cpu(), torch.tensor([-2.0, 4.0]))
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tensor_to_numpy_or_cuda_casts_to_the_declared_dtype_on_device():
+    """A device transport does not cast, so the tensor is sent in the schema's dtype."""
+    t = torch.tensor([1.0, 2.0], dtype=torch.float32, device="cuda")
+    out = _tensor_to_numpy_or_cuda(t, on_device=True, dtype=torch.float64)
+    assert out.dtype == torch.float64 and out.is_cuda
+
+
 def test_tensor_to_numpy_or_cuda_rejects_functional_tensors():
     """torch.func transforms wrap tensors without backing storage."""
     from torch import func
@@ -211,3 +248,55 @@ class TestCudaTensorWithoutDeviceTransport:
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
         assert result["c"].is_cuda
         assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))
+
+
+def test_nondiff_tensors_of_a_cpu_call_become_numpy():
+    """A tensor an in-process endpoint returns is placed like any other array.
+
+    In a call with only CPU tensors that means a NumPy array, wherever the
+    endpoint computed it.
+    """
+    t = torch.tensor([1.0, 2.0], requires_grad=True) * 1
+    placed = _place_nondiff_arrays(
+        {"t": t, "neg": t.detach().neg()}, torch.device("cpu")
+    )
+    assert isinstance(placed["t"], np.ndarray)
+    np.testing.assert_array_equal(placed["t"], [1.0, 2.0])
+    assert isinstance(placed["neg"], np.ndarray)
+
+
+def test_namedtuple_outputs_are_rebuilt():
+    point = collections.namedtuple("Point", "x y")
+    placed = _place_nondiff_arrays(point(np.ones(2), 1), torch.device("cpu"))
+    assert isinstance(placed, point)
+    assert placed.y == 1
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestPlaceNondiffArraysOnDevice:
+    """How a call with CUDA tensors places its non-differentiable outputs."""
+
+    device = torch.device("cuda")
+
+    @pytest.mark.parametrize("dtype", ["U3", "O", "datetime64[s]"])
+    def test_arrays_no_tensor_can_hold_stay_numpy(self, dtype):
+        a = np.zeros(3, dtype=dtype)
+        assert _place_nondiff_arrays({"a": a}, self.device)["a"] is a
+
+    def test_non_native_byte_order(self):
+        placed = _place_nondiff_arrays(np.arange(3, dtype=">f8"), self.device)
+        assert placed.is_cuda
+        torch.testing.assert_close(
+            placed.cpu(), torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)
+        )
+
+    def test_tensors_move_to_the_device(self):
+        placed = _place_nondiff_arrays(torch.ones(2), self.device)
+        assert placed.is_cuda
+
+    def test_namedtuple(self):
+        point = collections.namedtuple("Point", "x y")
+        placed = _place_nondiff_arrays(point(np.ones(2), 1), self.device)
+        assert isinstance(placed, point)
+        assert placed.x.is_cuda

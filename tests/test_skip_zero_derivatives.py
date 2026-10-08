@@ -240,7 +240,10 @@ def test_jvp_moves_tangents_to_output_device(nested_tess, monkeypatch):
         diff_output_specs=[(torch.Size([3]), torch.float32, torch.device("meta"))],
         gpu_transport="none",
         on_device=False,
-        saved_inputs={},
+        static_inputs={},
+        tensor_paths=[("x",)],
+        tensor_dtypes=[None],
+        saved_tensors=(torch.ones(3),),
     )
 
     (tangent,) = _TesseractFunction.jvp(
