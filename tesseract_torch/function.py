@@ -19,7 +19,6 @@ from typing import Any, get_args
 import numpy as np
 import torch
 from tesseract_core import Tesseract
-from tesseract_core.runtime.config import gpu_transport_type
 
 # A leaf's path, one entry per schema level. Kept as segments rather than a
 # dotted string because a dict key is free to contain a dot. An int segment is
@@ -28,10 +27,17 @@ from tesseract_core.runtime.config import gpu_transport_type
 type KeyType = tuple[str | int, ...]
 
 
-# On-device transports, read from tesseract-core's ``gpu_transport`` enum so the
-# two can't drift. The enum's ``"none"`` means host round-trip and is handled
-# separately.
-_SUPPORTED_TRANSPORTS = frozenset(get_args(gpu_transport_type)) - {"none"}
+def _supported_transports() -> frozenset[str]:
+    """On-device transports, read from tesseract-core's ``gpu_transport`` enum.
+
+    Read from the enum so the two can't drift; its ``"none"`` means host
+    round-trip and is handled separately. Imported on first use because
+    ``tesseract_core.runtime`` needs the ``tesseract-core[runtime]`` extra,
+    which only calls that use a GPU transport need.
+    """
+    from tesseract_core.runtime.config import gpu_transport_type
+
+    return frozenset(get_args(gpu_transport_type)) - {"none"}
 
 
 def _target_device(tensors: Sequence[torch.Tensor]) -> torch.device:
@@ -56,11 +62,14 @@ def _resolve_gpu_transport(tesseract: Tesseract, device: torch.device) -> str:
     if device.type != "cuda":
         return "none"
     gpu_transport = tesseract.resolve_gpu_transport()
-    if gpu_transport != "none" and gpu_transport not in _SUPPORTED_TRANSPORTS:
+    if gpu_transport == "none":
+        return gpu_transport
+    supported = _supported_transports()
+    if gpu_transport not in supported:
         raise ValueError(
             f"The Tesseract requests gpu_transport={gpu_transport!r}, which "
             f"tesseract-torch cannot drive (supported: "
-            f"{['none', *sorted(_SUPPORTED_TRANSPORTS)]}). Pass "
+            f"{['none', *sorted(supported)]}). Pass "
             "tesseract.with_encoding(gpu_transport='none') to apply_tesseract to "
             "copy CUDA tensors to the host instead."
         )
