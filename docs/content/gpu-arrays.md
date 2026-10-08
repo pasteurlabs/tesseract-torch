@@ -1,6 +1,6 @@
 # CUDA tensors
 
-When you pass CUDA tensors to `apply_tesseract`, they stay on the device whenever possible, and are copied through the host otherwise. Either way the results are the same: tensor outputs land on the device of the first CUDA tensor among the inputs (or the CPU if there is none), and non-differentiable array outputs are NumPy arrays. So you do not need to change any code; only the speed differs. GPU transports are an experimental tesseract-core feature.
+When you pass CUDA tensors to `apply_tesseract`, they stay on the device whenever possible, and are copied through the host otherwise. Either way the results are the same: tensor outputs land on the device of the first CUDA tensor among the inputs (or the CPU if there is none), and non-differentiable array outputs are tensors on that device too (NumPy arrays in a call with only CPU tensors). So you do not need to change any code; only the speed differs. GPU transports are an experimental tesseract-core feature.
 
 ## Serving a Tesseract with `cuda_ipc`
 

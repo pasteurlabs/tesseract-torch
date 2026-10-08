@@ -44,7 +44,7 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     A view requesting ``gpu_transport="none"`` overrides the transport the
     Tesseract was created with, in both directions. Which transport a call
     uses must not change its result, so both outputs land on the input's
-    device, and the non-differentiable one is a NumPy array either way.
+    device either way, the non-differentiable one as a tensor too.
     """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
@@ -55,9 +55,11 @@ def test_apply_matches_host_path(served_gpu_tesseract):
 
     assert ipc["c"].is_cuda and host["c"].is_cuda
     np.testing.assert_array_equal(ipc["c"].cpu().numpy(), host["c"].cpu().numpy())
-    assert isinstance(ipc["c_sum"], np.ndarray)
-    assert isinstance(host["c_sum"], np.ndarray)
-    np.testing.assert_array_equal(ipc["c_sum"], host["c_sum"])
+    assert isinstance(ipc["c_sum"], torch.Tensor) and ipc["c_sum"].is_cuda
+    assert isinstance(host["c_sum"], torch.Tensor) and host["c_sum"].is_cuda
+    np.testing.assert_array_equal(
+        ipc["c_sum"].cpu().numpy(), host["c_sum"].cpu().numpy()
+    )
 
 
 def test_from_url_client_uses_cuda_ipc_once_checked(served_gpu_tesseract):
@@ -140,8 +142,8 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
     """A non-differentiable output must not break the jvp path or force a host copy.
 
     ``c_sum`` is a non-differentiable output, so the jvp endpoint returns no
-    tangent for it and it comes back as-is (a host array) rather than a dual
-    tensor. Its presence must not disturb the differentiable output ``c``, whose
+    tangent for it and it comes back as a plain tensor on the input's device
+    rather than a dual tensor. Its presence must not disturb the differentiable output ``c``, whose
     tangent must still come back correct and on-device under ``cuda_ipc``.
     """
     import torch.autograd.forward_ad as fwAD
@@ -164,8 +166,9 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
     # The non-differentiable c_sum output still comes back, matching the analytic
     # sum(c) = sum(a*2 + b).
     expected_c_sum = (a * 2.0 + b).sum().item()
+    assert out["c_sum"].is_cuda
     np.testing.assert_allclose(
-        np.asarray(out["c_sum"]).reshape(()), expected_c_sum, rtol=1e-6
+        out["c_sum"].cpu().numpy().reshape(()), expected_c_sum, rtol=1e-6
     )
 
 

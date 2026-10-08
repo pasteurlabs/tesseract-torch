@@ -104,20 +104,27 @@ def _with_gpu_transport(tesseract: Tesseract, gpu_transport: str) -> Tesseract:
     return tesseract.with_encoding(gpu_transport=gpu_transport)
 
 
-def _device_arrays_to_numpy(value: Any) -> Any:
-    """Copy the device arrays a response decoded into ``value`` to NumPy arrays.
+def _place_nondiff_arrays(value: Any, device: torch.device) -> Any:
+    """Place the arrays among a call's non-differentiable outputs in ``value``.
 
-    A non-differentiable array output comes back as a NumPy array whichever
-    transport the call used, so it does not depend on whether GPU arrays could
-    stay on the device. Tensors an in-process endpoint returns are left alone.
+    In a call with CUDA tensors they become tensors on ``device``, like the
+    differentiable outputs, so a device array the transport delivered stays on
+    the device. Otherwise they are NumPy arrays. Either way the result does not
+    depend on the transport the call used. Tensors an in-process endpoint
+    returns are left alone.
     """
     if isinstance(value, dict):
-        return {key: _device_arrays_to_numpy(item) for key, item in value.items()}
+        return {key: _place_nondiff_arrays(item, device) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        return type(value)(_device_arrays_to_numpy(item) for item in value)
-    if hasattr(value, "__cuda_array_interface__") and not isinstance(
-        value, torch.Tensor
-    ):
+        return type(value)(_place_nondiff_arrays(item, device) for item in value)
+    if isinstance(value, torch.Tensor):
+        return value
+    is_device_array = hasattr(value, "__cuda_array_interface__")
+    if device.type == "cuda":
+        if is_device_array or isinstance(value, np.ndarray | np.generic):
+            return _to_tensor(value).to(device)
+        return value
+    if is_device_array:
         return _to_tensor(value).cpu().numpy()
     return value
 
@@ -883,9 +890,10 @@ def apply_tesseract(
     Returns:
         Nested dict matching the Tesseract's output schema, with
         differentiable array outputs as ``torch.Tensor`` (with ``grad_fn``
-        when inputs require grad) and non-differentiable outputs as-is
-        (NumPy arrays or scalars; array outputs become tensors under
-        ``torch.vmap``, on the same device as the differentiable ones).
+        when inputs require grad) and non-differentiable outputs as NumPy
+        arrays or scalars. Non-differentiable array outputs become tensors
+        on the same device as the differentiable ones in a call with CUDA
+        tensors, and under ``torch.vmap``.
 
     Example::
 
@@ -965,7 +973,7 @@ def apply_tesseract(
     }
     # forward() already adopted the arrays behind the returned tensors.
     flat_result = {
-        path: value if path in returned else _device_arrays_to_numpy(value)
+        path: value if path in returned else _place_nondiff_arrays(value, device)
         for path, value in slot.flat_result.items()
     }
     flat_result.update(returned)

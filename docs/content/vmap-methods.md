@@ -73,7 +73,7 @@ Tensors and NumPy arrays on non-differentiable fields can be batched too, under 
 ## Outputs
 
 - Differentiable outputs come back as batched tensors.
-- Non-differentiable array outputs come back as tensors inside `torch.vmap`, since a NumPy array cannot carry the batch dimension. Outside `torch.vmap` they stay NumPy arrays.
+- Non-differentiable array outputs come back as tensors inside `torch.vmap`, since a NumPy array cannot carry the batch dimension. Outside `torch.vmap` they are NumPy arrays, unless the call has CUDA tensors (see [CUDA tensors](gpu-arrays.md)).
 - Outputs that are not arrays, such as a `bool` or `str` field, cannot carry a batch dimension and are returned once. Under `"sequential"` the value from the first element is returned, with a `UserWarning` if another element returned a different one. Under `"expand_dims"` and `"broadcast_all"` the value comes from the single batched call, so it describes the whole batch rather than any one element. A value that depends on the inputs belongs in the schema as an array instead.
 - Under `"broadcast_all"`, every array output must come back with a leading dimension of size `batch_size`. Under `"expand_dims"` it may also be 1, for an output that depends on no batched input. Any other shape raises a `ValueError`.
 - Under `"expand_dims"`, an output that depends on no input at all is read by its leading dimension, so one whose leading dimension happens to be 1 or `batch_size` is misread as batched. Use `"sequential"` for such outputs.
