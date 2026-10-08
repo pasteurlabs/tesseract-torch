@@ -104,7 +104,11 @@ def test_backward_drops_zero_cotangent(nested_tess, tmp_path, monkeypatch):
 
 
 def test_backward_with_only_zero_cotangents_skips_vjp(nested_tess, monkeypatch):
-    """Every cotangent zero -> the VJP is skipped and every grad stays None."""
+    """Every cotangent zero -> the VJP is skipped and every grad is zero.
+
+    The gradients must be zeros rather than None, which autograd reads as an
+    unused input: torch.autograd.grad would fail and .grad would stay unset.
+    """
 
     def _no_vjp(**kwargs):
         raise AssertionError("VJP called despite all-zero cotangents")
@@ -114,10 +118,15 @@ def test_backward_with_only_zero_cotangents_skips_vjp(nested_tess, monkeypatch):
     a = torch.tensor(5.0, requires_grad=True)
     v = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
     out = apply_tesseract(nested_tess, _inputs(a, v))
-    (0.0 * out["scalars"]["a"] + 0.0 * out["vectors"]["v"].sum()).backward()
+    loss = 0.0 * out["scalars"]["a"] + 0.0 * out["vectors"]["v"].sum()
 
-    assert a.grad is None
-    assert v.grad is None
+    grad_a, grad_v = torch.autograd.grad(loss, (a, v), retain_graph=True)
+    assert torch.equal(grad_a, torch.zeros(()))
+    assert torch.equal(grad_v, torch.zeros(3))
+
+    loss.backward()
+    assert torch.equal(a.grad, torch.zeros(()))
+    assert torch.equal(v.grad, torch.zeros(3))
 
 
 @pytest.mark.parametrize(

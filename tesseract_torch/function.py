@@ -511,14 +511,16 @@ class _TesseractFunction(torch.autograd.Function):
         ctx.on_device = params.gpu_transport != "none"
         ctx.num_tensors = len(tensors)
 
-        # Each input tensor's own device, in ctx.diff_input_wires order.
-        # Autograd requires the gradient backward() returns for an input to
-        # live on that same input's device, regardless of what device the
-        # Tesseract's VJP happens to compute/return on (e.g. always host on a
-        # host round-trip) -- backward() uses this to move each decoded gradient
-        # back before returning it.
-        ctx.diff_input_devices = [
-            tensor.device for tensor in tensors[: len(params.diff_input_wires)]
+        # Shape, dtype, and device of each input tensor, in
+        # ctx.diff_input_wires order. Autograd requires the gradient backward()
+        # returns for an input to live on that same input's device, regardless
+        # of what device the Tesseract's VJP happens to compute/return on (e.g.
+        # always host on a host round-trip) -- backward() uses this to move each
+        # decoded gradient back before returning it, and to build zero
+        # gradients.
+        ctx.diff_input_specs = [
+            (tensor.shape, tensor.dtype, tensor.device)
+            for tensor in tensors[: len(params.diff_input_wires)]
         ]
 
         saved_inputs: dict[KeyType, Any] = dict(params.static_inputs)
@@ -555,8 +557,6 @@ class _TesseractFunction(torch.autograd.Function):
             if not _is_zero_or_none(grad)
         }
         active_wires = list(cotangent_vector)
-        if not active_wires:
-            return (None,) * (_N_NON_TENSOR_ARGS + ctx.num_tensors)
 
         # Request gradients only for inputs that require grad, since a
         # finite-difference VJP pays per input element. Every tensor on a
@@ -564,35 +564,43 @@ class _TesseractFunction(torch.autograd.Function):
         # forward-mode tangent, so some of them need no gradient here.
         # needs_input_grad reflects requires_grad at forward time, so an input
         # left out of autograd.grad(inputs=...) is still requested.
+        needs_grad = ctx.needs_input_grad[
+            _N_NON_TENSOR_ARGS : _N_NON_TENSOR_ARGS + len(ctx.diff_input_wires)
+        ]
         needed_wires = [
             wire
-            for wire, needed in zip(
-                ctx.diff_input_wires,
-                ctx.needs_input_grad[
-                    _N_NON_TENSOR_ARGS : _N_NON_TENSOR_ARGS + len(ctx.diff_input_wires)
-                ],
-                strict=True,
-            )
+            for wire, needed in zip(ctx.diff_input_wires, needs_grad, strict=True)
             if needed
         ]
 
-        vjp_result = _with_gpu_transport(
-            ctx.tesseract, ctx.gpu_transport
-        ).vector_jacobian_product(
-            inputs=_unflatten_pytree(ctx.saved_inputs),
-            vjp_inputs=needed_wires,
-            vjp_outputs=active_wires,
-            cotangent_vector=cotangent_vector,
-        )
+        # All cotangents are zero, so all gradients are too. Return explicit
+        # zeros without calling the Tesseract: a None would tell autograd the
+        # input was not used, which fails torch.autograd.grad and leaves .grad
+        # unset.
+        if not active_wires:
+            vjp_result = {}
+        else:
+            vjp_result = _with_gpu_transport(
+                ctx.tesseract, ctx.gpu_transport
+            ).vector_jacobian_product(
+                inputs=_unflatten_pytree(ctx.saved_inputs),
+                vjp_inputs=needed_wires,
+                vjp_outputs=active_wires,
+                cotangent_vector=cotangent_vector,
+            )
 
-        # Inputs left out of the request get None, which autograd treats as a
-        # zero gradient.
+        # Inputs that need no gradient get None.
         grad_inputs: list[torch.Tensor | None] = []
-        for wire, device in zip(
-            ctx.diff_input_wires, ctx.diff_input_devices, strict=True
+        for wire, needed, (shape, dtype, device) in zip(
+            ctx.diff_input_wires, needs_grad, ctx.diff_input_specs, strict=True
         ):
             g = vjp_result.get(wire)
-            grad_inputs.append(_to_tensor(g).to(device) if g is not None else None)
+            if g is not None:
+                grad_inputs.append(_to_tensor(g).to(device))
+            elif needed:
+                grad_inputs.append(torch.zeros(shape, dtype=dtype, device=device))
+            else:
+                grad_inputs.append(None)
 
         # Non-differentiable tensors follow the differentiable ones and get
         # no gradient.
