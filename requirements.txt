@@ -107,7 +107,7 @@ shellingham==1.5.4
     # via typer
 sympy==1.14.0
     # via torch
-tesseract-core==1.14.0
+tesseract-core @ git+https://github.com/pasteurlabs/tesseract-core@87b97fe3e11eb6776c511243b7ef932755403bcd
     # via tesseract-torch
 torch==2.14.1
     # via tesseract-torch

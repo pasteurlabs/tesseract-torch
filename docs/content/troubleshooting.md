@@ -10,7 +10,7 @@ RuntimeError: apply_tesseract does not support torch.func transforms (torch.func
   - Forward mode: torch.autograd.forward_ad (dual tensors)
 ```
 
-**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, and `torch.func.jacrev` / `torch.func.jacfwd`, which build on them) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. `torch.vmap` is the exception; see the next entry.
+**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, and `torch.func.jacrev` / `torch.func.jacfwd`, which build on them) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. Batched backward (`torch.autograd.functional.jacobian(..., vectorize=True)`, or `is_grads_batched=True` in `torch.autograd.grad`) hands the backward pass the same kind of tensor and raises the same error. `torch.vmap` is the exception; see the next entry.
 
 **Fix.** Use PyTorch's standard autograd API, which `apply_tesseract` supports in both modes:
 
@@ -43,6 +43,16 @@ NotImplementedError: torch.vmap over apply_tesseract needs a batching strategy. 
 xs = torch.randn(8, 3)
 ys = torch.vmap(lambda x: apply_tesseract(tess, {"x": x}, vmap_method="sequential")["y"])(xs)
 ```
+
+## Higher-order derivatives
+
+```
+RuntimeError: apply_tesseract does not support higher-order derivatives: a Tesseract's vector_jacobian_product cannot itself be differentiated. Gradients computed with create_graph=True can be used, but not differentiated again.
+```
+
+**Cause.** A gradient taken with `create_graph=True` was differentiated again, for example to get a Hessian-vector product or a gradient penalty. The Tesseract's share of that gradient comes from its `vector_jacobian_product` endpoint, which PyTorch cannot differentiate, so a second derivative would leave that share out.
+
+**Fix.** Differentiate through `apply_tesseract` only once. Where a second derivative is needed, the Tesseract has to compute it, for example by exposing the gradient as an output of its own.
 
 ## Reverse-mode AD against a Tesseract without `vector_jacobian_product`
 
