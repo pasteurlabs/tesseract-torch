@@ -42,9 +42,9 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     """The cuda_ipc path must match the host-copy path exactly.
 
     A view requesting ``gpu_transport="none"`` overrides the transport the
-    Tesseract was created with, in both directions. Which transport a call
-    uses must not change its result, so both outputs land on the input's
-    device either way, the non-differentiable one as a tensor too.
+    Tesseract was created with, in both directions. Outputs follow the data:
+    over cuda_ipc they stay on the device, and through the host they come back
+    on the CPU, the non-differentiable one as a NumPy array.
     """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
@@ -53,13 +53,11 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     host_view = served_gpu_tesseract.with_encoding(gpu_transport="none")
     host = apply_tesseract(host_view, {"a": a, "b": b})
 
-    assert ipc["c"].is_cuda and host["c"].is_cuda
-    np.testing.assert_array_equal(ipc["c"].cpu().numpy(), host["c"].cpu().numpy())
+    assert ipc["c"].is_cuda and not host["c"].is_cuda
+    np.testing.assert_array_equal(ipc["c"].cpu().numpy(), host["c"].numpy())
     assert isinstance(ipc["c_sum"], torch.Tensor) and ipc["c_sum"].is_cuda
-    assert isinstance(host["c_sum"], torch.Tensor) and host["c_sum"].is_cuda
-    np.testing.assert_array_equal(
-        ipc["c_sum"].cpu().numpy(), host["c_sum"].cpu().numpy()
-    )
+    assert isinstance(host["c_sum"], np.ndarray)
+    np.testing.assert_array_equal(ipc["c_sum"].cpu().numpy(), host["c_sum"])
 
 
 def test_from_url_client_uses_cuda_ipc_once_checked(served_gpu_tesseract):
@@ -142,9 +140,10 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
     """A non-differentiable output must not break the jvp path or force a host copy.
 
     ``c_sum`` is a non-differentiable output, so the jvp endpoint returns no
-    tangent for it and it comes back as a plain tensor on the input's device
-    rather than a dual tensor. Its presence must not disturb the differentiable output ``c``, whose
-    tangent must still come back correct and on-device under ``cuda_ipc``.
+    tangent for it and it comes back as a plain tensor, on the device cuda_ipc
+    delivered it to, rather than a dual tensor. Its presence must not disturb
+    the differentiable output ``c``, whose tangent must still come back correct
+    and on-device under ``cuda_ipc``.
     """
     import torch.autograd.forward_ad as fwAD
 
@@ -281,9 +280,9 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
 
     Hiding the GPU from the server stands in for every reason cuda_ipc can fail,
     e.g. a server on another host. A ``from_url`` client, which requests no
-    transport, falls back to host copies and still returns its outputs on the
-    input's device, while the client that requested cuda_ipc gets an error
-    instead of a silent host copy.
+    transport, falls back to host copies, so its outputs come back on the CPU
+    while gradients still reach the inputs' device. The client that requested
+    cuda_ipc gets an error instead of a silent host copy.
     """
     if not torch.cuda.is_available():
         pytest.skip("no CUDA GPU available")
@@ -302,8 +301,8 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
         b = torch.ones(8, dtype=torch.float32, device="cuda")
         with pytest.warns(UserWarning, match="copied to the host instead"):
             out = apply_tesseract(remote, {"a": a, "b": b})
-        assert out["c"].is_cuda
-        np.testing.assert_allclose(out["c"].detach().cpu().numpy(), np.arange(8) + 1.0)
+        assert not out["c"].is_cuda
+        np.testing.assert_allclose(out["c"].detach().numpy(), np.arange(8) + 1.0)
         out["c"].sum().backward()
         assert a.grad.is_cuda
         np.testing.assert_allclose(a.grad.cpu().numpy(), np.ones(8))
@@ -370,16 +369,17 @@ def test_inputs_are_sent_in_the_declared_dtype(request, tess_fixture):
 @pytest.mark.parametrize(
     "tess_fixture", ["local_gpu_tesseract", "local_cuda_ipc_gpu_tesseract"]
 )
-def test_cpu_call_returns_nondiff_arrays_as_numpy(request, tess_fixture):
-    """A call with only CPU tensors returns NumPy arrays, wherever the endpoint computed.
+def test_in_process_outputs_follow_the_data(request, tess_fixture):
+    """Tensors an in-process endpoint returns stay where it computed them.
 
-    This endpoint computes on the GPU and returns tensors in-process.
+    This endpoint computes on the GPU and returns tensors in-process, so even a
+    call with only CPU tensors gets its outputs on the GPU.
     """
     tess = request.getfixturevalue(tess_fixture)
     out = apply_tesseract(tess, {"a": torch.ones(3), "b": torch.ones(3)})
-    assert out["c"].device.type == "cpu"
-    assert isinstance(out["c_sum"], np.ndarray)
-    np.testing.assert_allclose(out["c_sum"], [9.0])
+    assert out["c"].is_cuda
+    assert isinstance(out["c_sum"], torch.Tensor) and out["c_sum"].is_cuda
+    np.testing.assert_allclose(out["c_sum"].cpu().numpy(), [9.0])
 
 
 def test_negative_view_through_cuda_ipc(served_gpu_tesseract):

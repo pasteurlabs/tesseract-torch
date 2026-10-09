@@ -73,7 +73,8 @@ def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
     """A container offering cuda_ipc that it cannot use leads to host copies.
 
     A ``from_url`` client, which requests no transport, falls back to host
-    copies with a warning and still returns its outputs on the input's device.
+    copies with a warning, so its outputs come back on the CPU while gradients
+    still reach the inputs' device.
     The client that requested cuda_ipc gets an error instead of a silent host
     copy.
     """
@@ -88,10 +89,8 @@ def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
         b = torch.ones(8, dtype=torch.float32, device="cuda")
         with pytest.warns(UserWarning, match="copied to the host instead"):
             out = apply_tesseract(remote, {"a": a, "b": b})
-        assert out["c"].is_cuda
-        np.testing.assert_allclose(
-            out["c"].detach().cpu().numpy(), 2 * np.arange(8) + 1.0
-        )
+        assert not out["c"].is_cuda
+        np.testing.assert_allclose(out["c"].detach().numpy(), 2 * np.arange(8) + 1.0)
         out["c"].sum().backward()
         assert a.grad.is_cuda
         np.testing.assert_allclose(a.grad.cpu().numpy(), np.full(8, 2.0))

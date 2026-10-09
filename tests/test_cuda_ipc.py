@@ -23,7 +23,7 @@ from tesseract_core import Tesseract
 
 from tesseract_torch import apply_tesseract
 from tesseract_torch.function import (
-    _place_nondiff_arrays,
+    _adopt_device_arrays,
     _resolve_gpu_transport,
     _tensor_to_numpy_or_cuda,
     _to_tensor,
@@ -242,61 +242,60 @@ class TestCudaTensorWithoutDeviceTransport:
     """Without a device transport, CUDA tensors still take the host round-trip."""
 
     def test_cuda_tensor_forward_default(self, vectoradd_tess):
-        """The output still lands on the input's device."""
+        """The output follows the data, which came back through the host."""
         a = torch.tensor([1.0, 2.0, 3.0], device="cuda")
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
-        assert result["c"].is_cuda
-        assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))
+        assert not result["c"].is_cuda
+        assert torch.allclose(result["c"], torch.tensor([5.0, 7.0, 9.0]))
 
 
-def test_nondiff_tensors_of_a_cpu_call_become_numpy():
-    """A tensor an in-process endpoint returns is placed like any other array.
+class _DeliveredDeviceArray:
+    """Stands in for the ``IpcDeviceArray`` a GPU transport delivers."""
 
-    In a call with only CPU tensors that means a NumPy array, wherever the
-    endpoint computed it.
-    """
-    t = torch.tensor([1.0, 2.0], requires_grad=True) * 1
-    placed = _place_nondiff_arrays(
-        {"t": t, "neg": t.detach().neg()}, torch.device("cpu")
-    )
-    assert isinstance(placed["t"], np.ndarray)
-    np.testing.assert_array_equal(placed["t"], [1.0, 2.0])
-    assert isinstance(placed["neg"], np.ndarray)
+    def __init__(self, tensor: torch.Tensor) -> None:
+        self._tensor = tensor
+        self.__cuda_array_interface__ = tensor.__cuda_array_interface__
+
+    def __dlpack__(self, *args: object, **kwargs: object) -> object:
+        return torch.utils.dlpack.to_dlpack(self._tensor)
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        return self._tensor.__dlpack_device__()
+
+
+def test_nondiff_host_arrays_and_tensors_follow_the_data():
+    """Host arrays stay NumPy arrays and returned tensors stay where they are."""
+    a, t = np.arange(3.0), torch.ones(2)
+    strings = np.array(["x", "y"])
+    adopted = _adopt_device_arrays({"a": a, "t": t, "s": strings, "n": 1.5})
+    assert adopted["a"] is a
+    assert adopted["t"] is t
+    assert adopted["s"] is strings
+    assert adopted["n"] == 1.5
 
 
 def test_namedtuple_outputs_are_rebuilt():
     point = collections.namedtuple("Point", "x y")
-    placed = _place_nondiff_arrays(point(np.ones(2), 1), torch.device("cpu"))
-    assert isinstance(placed, point)
-    assert placed.y == 1
+    adopted = _adopt_device_arrays(point(np.ones(2), 1))
+    assert isinstance(adopted, point)
+    assert adopted.y == 1
 
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-class TestPlaceNondiffArraysOnDevice:
-    """How a call with CUDA tensors places its non-differentiable outputs."""
-
-    device = torch.device("cuda")
-
-    @pytest.mark.parametrize("dtype", ["U3", "O", "datetime64[s]"])
-    def test_arrays_no_tensor_can_hold_stay_numpy(self, dtype):
-        a = np.zeros(3, dtype=dtype)
-        assert _place_nondiff_arrays({"a": a}, self.device)["a"] is a
-
-    def test_non_native_byte_order(self):
-        placed = _place_nondiff_arrays(np.arange(3, dtype=">f8"), self.device)
-        assert placed.is_cuda
-        torch.testing.assert_close(
-            placed.cpu(), torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)
-        )
-
-    def test_tensors_move_to_the_device(self):
-        placed = _place_nondiff_arrays(torch.ones(2), self.device)
-        assert placed.is_cuda
-
-    def test_namedtuple(self):
-        point = collections.namedtuple("Point", "x y")
-        placed = _place_nondiff_arrays(point(np.ones(2), 1), self.device)
-        assert isinstance(placed, point)
-        assert placed.x.is_cuda
+def test_nondiff_device_arrays_become_tensors_on_their_device():
+    """A device array the transport delivered is adopted without a copy."""
+    source = torch.arange(4.0, device="cuda")
+    point = collections.namedtuple("Point", "x y")
+    adopted = _adopt_device_arrays(
+        {
+            "d": _DeliveredDeviceArray(source),
+            "p": point(_DeliveredDeviceArray(source), 2),
+        }
+    )
+    assert adopted["d"].is_cuda
+    assert adopted["d"].data_ptr() == source.data_ptr()
+    assert adopted["p"].x.is_cuda and adopted["p"].y == 2
+    cuda_tensor = torch.ones(2, device="cuda")
+    assert _adopt_device_arrays(cuda_tensor) is cuda_tensor
