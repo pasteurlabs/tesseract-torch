@@ -50,7 +50,7 @@ ys = torch.vmap(lambda x: apply_tesseract(tess, {"x": x}, vmap_method="sequentia
 RuntimeError: apply_tesseract does not support higher-order derivatives: a Tesseract's vector_jacobian_product cannot itself be differentiated. Gradients computed with create_graph=True can be used, but not differentiated again.
 ```
 
-**Cause.** A gradient taken with `create_graph=True` was differentiated again, for example to get a Hessian-vector product or a gradient penalty. Its contribution from the Tesseract comes from the Tesseract's `vector_jacobian_product` endpoint, which PyTorch cannot differentiate, so any second derivative would leave that contribution out.
+**Cause.** A gradient taken with `create_graph=True` was differentiated again, for example to get a Hessian-vector product or a gradient penalty. The Tesseract's share of that gradient comes from its `vector_jacobian_product` endpoint, which PyTorch cannot differentiate, so a second derivative would leave that share out.
 
 **Fix.** Differentiate through `apply_tesseract` only once. Where a second derivative is needed, the Tesseract has to compute it, for example by exposing the gradient as an output of its own.
 

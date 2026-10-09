@@ -107,7 +107,7 @@ def test_backward_with_only_zero_cotangents_skips_vjp(nested_tess, monkeypatch):
     """Every cotangent zero -> the VJP is skipped and every grad is zero.
 
     The gradients must be zeros rather than None, which autograd reads as an
-    unused input: torch.autograd.grad would fail and .grad would stay unset.
+    unused input, so torch.autograd.grad would fail and .grad would stay unset.
     """
 
     def _no_vjp(**kwargs):

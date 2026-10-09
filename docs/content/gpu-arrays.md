@@ -1,6 +1,6 @@
 # CUDA tensors
 
-When you pass CUDA tensors to `apply_tesseract`, they stay on the device whenever possible, and are copied through the host otherwise. Outputs follow the data the same way: an array the Tesseract returns on the GPU arrives over the GPU transport as a CUDA tensor on its device, and anything that comes through the host (CPU arrays, or GPU arrays when no transport works) arrives on the CPU, as a tensor for differentiable outputs and as a NumPy array otherwise. Gradients always land on the device of the input they belong to. The values are the same either way; only where they live and the speed differ. GPU transports are an experimental tesseract-core feature.
+When you pass CUDA tensors to `apply_tesseract`, they stay on the device whenever possible, and are copied through the host otherwise. Outputs follow the data the same way. An array the Tesseract returns on the GPU arrives over the GPU transport as a CUDA tensor on its device, and anything that comes through the host (CPU arrays, or GPU arrays when no transport works) arrives on the CPU, as a tensor for differentiable outputs and as a NumPy array otherwise. Gradients always land on the device of the input they belong to. The values are the same either way, and only where they live and the speed differ. GPU transports are an experimental tesseract-core feature.
 
 ## Serving a Tesseract with `cuda_ipc`
 
@@ -32,8 +32,10 @@ apply_tesseract(tess.with_encoding(gpu_transport="none"), inputs)
 
 ## In-process Tesseracts
 
-A Tesseract loaded with `Tesseract.from_tesseract_api` receives NumPy arrays by default. Create it with `gpu_transport="cuda_ipc"` to hand its endpoints the CUDA tensors as they are; its endpoints must then handle device arrays (for example, compute with torch):
+A Tesseract loaded with `Tesseract.from_tesseract_api` receives NumPy arrays by default, and tensors its endpoints return come back unchanged. Create it with `gpu_transport="cuda_ipc"` to hand its endpoints the CUDA tensors as they are. Its endpoints must then handle device arrays, for example by computing with torch:
 
 ```python
 tess = Tesseract.from_tesseract_api("tesseract_api.py", gpu_transport="cuda_ipc")
 ```
+
+The endpoints must not modify these input tensors in place. They share memory with the caller's tensors, so an in-place change such as `x -= x.mean()` silently changes the caller's values. Compute into a new tensor instead (`x = x - x.mean()`). A served Tesseract is not affected, since it receives its own copy of each input.

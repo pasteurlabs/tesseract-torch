@@ -42,9 +42,9 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     """The cuda_ipc path must match the host-copy path exactly.
 
     A view requesting ``gpu_transport="none"`` overrides the transport the
-    Tesseract was created with, in both directions. Outputs follow the data:
-    over cuda_ipc they stay on the device, and through the host they come back
-    on the CPU, the non-differentiable one as a NumPy array.
+    Tesseract was created with, in both directions. Over cuda_ipc the outputs
+    stay on the device, and through the host they come back on the CPU, the
+    non-differentiable one as a NumPy array.
     """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
@@ -227,8 +227,8 @@ def test_local_client_receives_cuda_tensors_if_created_with_transport(
     computes on the GPU, so the output alone cannot tell the two apart, and the
     payload the client receives is checked instead.
     """
-    local_gpu_tesseract = request.getfixturevalue(tess_fixture)
-    client = local_gpu_tesseract._client
+    tess = request.getfixturevalue(tess_fixture)
+    client = tess._client
     received = []
     run_tesseract = client.run_tesseract
 
@@ -241,7 +241,7 @@ def test_local_client_receives_cuda_tensors_if_created_with_transport(
 
     a = torch.arange(8, dtype=torch.float32, device="cuda")
     b = torch.ones(8, dtype=torch.float32, device="cuda")
-    out = apply_tesseract(local_gpu_tesseract, {"a": a, "b": b})
+    out = apply_tesseract(tess, {"a": a, "b": b})
 
     assert out["c"].is_cuda
     assert isinstance(received[0], received_type)
@@ -254,14 +254,13 @@ def test_local_client_receives_cuda_tensors_if_created_with_transport(
 
 def test_local_client_derivatives_with_transport(local_cuda_ipc_gpu_tesseract):
     """Vjp and jvp of an in-process client created with a transport stay on-device."""
-    local_gpu_tesseract = local_cuda_ipc_gpu_tesseract
     import torch.autograd.forward_ad as fwAD
 
     n = 64
     a = torch.arange(n, dtype=torch.float32, device="cuda", requires_grad=True)
     b = torch.ones(n, dtype=torch.float32, device="cuda")
 
-    out = apply_tesseract(local_gpu_tesseract, {"a": a, "b": b})
+    out = apply_tesseract(local_cuda_ipc_gpu_tesseract, {"a": a, "b": b})
     out["c"].sum().backward()
     assert a.grad.is_cuda
     np.testing.assert_allclose(a.grad.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
@@ -269,7 +268,7 @@ def test_local_client_derivatives_with_transport(local_cuda_ipc_gpu_tesseract):
     with fwAD.dual_level():
         a_dual = fwAD.make_dual(a.detach(), torch.ones_like(b))
         b_dual = fwAD.make_dual(b, torch.zeros_like(b))
-        out = apply_tesseract(local_gpu_tesseract, {"a": a_dual, "b": b_dual})
+        out = apply_tesseract(local_cuda_ipc_gpu_tesseract, {"a": a_dual, "b": b_dual})
         _primal, tangent = fwAD.unpack_dual(out["c"])
     assert tangent.is_cuda
     np.testing.assert_allclose(tangent.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)

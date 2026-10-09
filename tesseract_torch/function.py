@@ -14,7 +14,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, get_args
+from typing import Any
 
 import numpy as np
 import torch
@@ -27,49 +27,26 @@ from tesseract_core import Tesseract
 type KeyType = tuple[str | int, ...]
 
 
-def _supported_transports() -> frozenset[str]:
-    """On-device transports, read from tesseract-core's ``gpu_transport`` enum.
-
-    Read from the enum so the two can't drift; its ``"none"`` means host
-    round-trip and is handled separately. Imported on first use because
-    ``tesseract_core.runtime`` needs the ``tesseract-core[runtime]`` extra,
-    which only calls that use a GPU transport need.
-    """
-    from tesseract_core.runtime.config import gpu_transport_type
-
-    return frozenset(get_args(gpu_transport_type)) - {"none"}
+# Device transports tesseract-torch is tested with end-to-end. Add names here as
+# it learns to drive more of tesseract-core's transports.
+_SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 
 
-def _target_device(tensors: Sequence[torch.Tensor]) -> torch.device:
-    """The device of a call's first CUDA tensor, else the CPU.
-
-    Only a call with CUDA tensors has GPU arrays to exchange, so only such a
-    call uses a GPU transport.
-    """
-    for tensor in tensors:
-        if tensor.is_cuda:
-            return tensor.device
-    return torch.device("cpu")
-
-
-def _resolve_gpu_transport(tesseract: Tesseract, device: torch.device) -> str:
+def _resolve_gpu_transport(tesseract: Tesseract, *, has_cuda_tensors: bool) -> str:
     """Return the transport a call uses, either ``"none"`` or a device transport.
 
     Only a call with CUDA tensors has GPU arrays to exchange, so only such a call
     asks the Tesseract which transport to use (see
     ``Tesseract.resolve_gpu_transport``), which may check that it works.
     """
-    if device.type != "cuda":
+    if not has_cuda_tensors:
         return "none"
     gpu_transport = tesseract.resolve_gpu_transport()
-    if gpu_transport == "none":
-        return gpu_transport
-    supported = _supported_transports()
-    if gpu_transport not in supported:
+    if gpu_transport != "none" and gpu_transport not in _SUPPORTED_TRANSPORTS:
         raise ValueError(
             f"The Tesseract requests gpu_transport={gpu_transport!r}, which "
             f"tesseract-torch cannot drive (supported: "
-            f"{['none', *sorted(supported)]}). Pass "
+            f"{['none', *sorted(_SUPPORTED_TRANSPORTS)]}). Pass "
             "tesseract.with_encoding(gpu_transport='none') to apply_tesseract to "
             "copy CUDA tensors to the host instead."
         )
@@ -91,11 +68,10 @@ def _validate_vmap_method(vmap_method: str | None) -> None:
 def _with_gpu_transport(tesseract: Tesseract, gpu_transport: str) -> Tesseract:
     """``tesseract``, or a view of it, whose calls use ``gpu_transport``.
 
-    A device transport sends CUDA tensors by reference and asks for outputs the
-    same way; ``"none"`` keeps both on the host. An in-process Tesseract encodes
-    nothing, so it is returned as it is, as is one that already requests the
-    transport. Taken per call, so an autograd graph keeps working after the
-    Tesseract is served again.
+    An in-process Tesseract encodes nothing, so it is returned as it is, as is
+    one that already requests the transport. Taken per call rather than stored,
+    since a view keeps the connection it was taken from, and the Tesseract may
+    have been served again by the time backward() runs.
     """
     if tesseract.server_capabilities is None:
         return tesseract
@@ -105,12 +81,10 @@ def _with_gpu_transport(tesseract: Tesseract, gpu_transport: str) -> Tesseract:
 
 
 def _adopt_device_arrays(value: Any) -> Any:
-    """Turn the device arrays among a call's non-differentiable outputs into tensors.
+    """Adopt the device arrays among non-differentiable outputs as CUDA tensors.
 
-    Outputs follow the data: a device array the GPU transport delivered becomes
-    a tensor on its device, adopted without a copy, and an array sent through
-    the host stays a NumPy array. Tensors an in-process endpoint returns are
-    left as they are.
+    Adopted without a copy. Host arrays stay NumPy arrays, and tensors an
+    in-process endpoint returned are left as they are.
     """
     if isinstance(value, dict):
         return {key: _adopt_device_arrays(item) for key, item in value.items()}
@@ -158,13 +132,11 @@ def _tensor_can_hold(value: Any) -> bool:
 def _to_tensor(arr: Any) -> torch.Tensor:
     """Convert a decoded Tesseract array to a tensor, copying if read-only.
 
-    A NumPy array in non-native byte order is copied into native order, which
-    is the only one tensors use.
-
-    ``arr`` is a NumPy array (host encodings) or an ``IpcDeviceArray``
+    ``arr`` is a NumPy array (host encodings), an ``IpcDeviceArray``
     (``cuda_ipc`` encoding, a fresh device buffer owned by this process,
-    adopted zero-copy via DLPack). A ``torch.Tensor`` is passed through
-    untouched, should an endpoint ever echo one back verbatim.
+    adopted zero-copy via DLPack), or a tensor an in-process endpoint returned,
+    which is passed through. A NumPy array in non-native byte order is copied
+    into native order, the only one tensors use.
 
     The DLPack branch is gated on ``__cuda_array_interface__`` rather than
     ``__dlpack__`` alone: plain ``np.ndarray`` also implements ``__dlpack__``
@@ -225,18 +197,12 @@ def _tensor_to_numpy_or_cuda(
 ) -> Any:
     """Convert a torch tensor to a numpy array, or pass a CUDA tensor through.
 
-    A CUDA tensor already exposes ``__cuda_array_interface__``, so when a device
-    transport is active for this call it can be handed to the Tesseract client
-    as-is and exported by IPC handle instead of copied to host. It must be
-    contiguous, since the transport moves a flat byte range with no strides,
-    and of the *dtype* the schema declares, if given, since the transport
-    does not cast on the device the way the host path casts on decode.
-    Without a device transport, a CUDA tensor still needs the host copy below:
-    the client's default encoder calls ``np.asanyarray`` on it, which cannot
-    read GPU memory.
-
-    Negative and conjugate views are resolved first, since neither NumPy nor
-    the transport can represent the lazy bit.
+    With ``on_device``, a CUDA tensor goes to the client as it is, to be sent by
+    reference. It is made contiguous, since the transport moves a flat byte
+    range, and cast to *dtype*, since only the host path casts on decode.
+    Otherwise it is copied to the host, since the client's encoder cannot read
+    GPU memory. Negative and conjugate views are resolved first, since neither
+    NumPy nor the transport can represent the lazy bit.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
@@ -569,7 +535,7 @@ class _TesseractFunction(torch.autograd.Function):
         slot.flat_result = flat_result
         slot.outputs = resolved_outputs
 
-        # Outputs follow the data: each stays on the device it arrived on.
+        # Each output stays on the device it arrived on.
         return tuple(_to_tensor(flat_result[c]) for c, _ in resolved_outputs)
 
     @staticmethod
@@ -591,20 +557,18 @@ class _TesseractFunction(torch.autograd.Function):
         ctx.on_device = params.gpu_transport != "none"
         ctx.num_tensors = len(tensors)
 
-        # Shape, dtype, and device of each input tensor, in
-        # ctx.diff_input_wires order. Autograd requires the gradient backward()
-        # returns for an input to live on that same input's device, regardless
-        # of what device the Tesseract's VJP happens to compute/return on (e.g.
-        # always host on a host round-trip) -- backward() uses this to move each
-        # decoded gradient back before returning it, and to build zero
-        # gradients.
+        # Shape, dtype, and device of each differentiable input, in
+        # ctx.diff_input_wires order. backward() builds zero gradients from
+        # these, and moves each decoded gradient to its input's device, as
+        # autograd requires, wherever the VJP returned it.
         ctx.diff_input_specs = [
             (tensor.shape, tensor.dtype, tensor.device)
             for tensor in tensors[: len(params.diff_input_wires)]
         ]
 
-        # Under a torch.func transform forward() sees unwrapped tensors and
-        # only these are wrapped, so this is where such a call is rejected.
+        # Under a torch.func transform, forward() sees unwrapped tensors and
+        # only setup_context() sees the wrapped ones, so the call is rejected
+        # here.
         for tensor in tensors:
             _require_storage(tensor)
         # backward() and jvp() rebuild the inputs from the saved tensors, so
@@ -663,10 +627,10 @@ class _TesseractFunction(torch.autograd.Function):
             if needed
         ]
 
-        # All cotangents are zero, so all gradients are too. Return explicit
-        # zeros without calling the Tesseract: a None would tell autograd the
-        # input was not used, which fails torch.autograd.grad and leaves .grad
-        # unset.
+        # All cotangents are zero, so all gradients are too. Skip the
+        # Tesseract and return explicit zeros, since a None would tell autograd
+        # the input was not used, which fails torch.autograd.grad and leaves
+        # .grad unset.
         if not active_wires:
             vjp_result = {}
         else:
@@ -1005,16 +969,15 @@ def apply_tesseract(
     Arrays follow the data. CUDA tensors stay on the device whenever the
     Tesseract offers a GPU transport that works from this process, and are
     copied to the host otherwise (see ``Tesseract.resolve_gpu_transport``).
-    Outputs come back the same way: an array the Tesseract returns on the GPU
-    arrives over that transport as a CUDA tensor on its device, and anything
-    that comes through the host arrives on the CPU. Gradients always land on
-    the device of the input they belong to. Pass
+    An output that arrives over the GPU transport is a CUDA tensor on its
+    device, and one that comes through the host is on the CPU. Gradients land
+    on the device of the input they belong to. Pass
     ``tesseract.with_encoding(gpu_transport="none")`` to always copy CUDA
-    tensors to the host. An in-process Tesseract receives CUDA
-    tensors as they are only if it was created with
+    tensors to the host. An in-process Tesseract receives CUDA tensors as they
+    are only if it was created with
     ``Tesseract.from_tesseract_api(..., gpu_transport="cuda_ipc")``, and its
-    endpoints must then handle device arrays (e.g. compute with torch). GPU
-    transports are an experimental tesseract-core feature.
+    endpoints must then handle them. GPU transports are an experimental
+    tesseract-core feature. See :doc:`/content/gpu-arrays`.
 
     Args:
         tesseract: A Tesseract instance.
@@ -1102,7 +1065,7 @@ def apply_tesseract(
         else:
             static[path] = value
 
-    device = _target_device(diff_tensors + nondiff_tensors)
+    has_cuda_tensors = any(t.is_cuda for t in diff_tensors + nondiff_tensors)
     params = _DispatchParams(
         tesseract=tesseract,
         tensor_paths=diff_paths + nondiff_paths,
@@ -1113,7 +1076,9 @@ def apply_tesseract(
         diff_output_templates=diff_out_templates,
         all_paths=all_paths,
         static_inputs=static,
-        gpu_transport=_resolve_gpu_transport(tesseract, device),
+        gpu_transport=_resolve_gpu_transport(
+            tesseract, has_cuda_tensors=has_cuda_tensors
+        ),
         vmap_method=vmap_method,
     )
     slot = _ResultSlot()
@@ -1127,11 +1092,9 @@ def apply_tesseract(
         concrete: tensor
         for (concrete, _wire), tensor in zip(slot.outputs, output_tensors, strict=True)
     }
-    # forward() already adopted the arrays behind the returned tensors.
     flat_result = {
-        path: value if path in returned else _adopt_device_arrays(value)
+        path: returned[path] if path in returned else _adopt_device_arrays(value)
         for path, value in slot.flat_result.items()
     }
-    flat_result.update(returned)
 
     return _unflatten_pytree(flat_result)

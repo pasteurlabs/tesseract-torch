@@ -4,8 +4,8 @@
 """Tests for how ``apply_tesseract`` picks and drives a GPU transport.
 
 These exercise the pure-Python plumbing (which transport a call uses, when it
-goes through an encoding view, and the ``_to_tensor`` decode gate) without
-needing a GPU. Full end-to-end coverage (a real ``HTTPClient`` talking CUDA IPC
+goes through an encoding view, and how arrays are converted), most of it
+without a GPU. Full end-to-end coverage (a real ``HTTPClient`` talking CUDA IPC
 to a served GPU Tesseract) lives in ``test_gpu_direct`` and tesseract-core's own
 suite; here we only need to verify tesseract-torch drives that API correctly.
 """
@@ -191,8 +191,8 @@ def test_cpu_tensors_take_the_host_path(vectoradd_api_path):
     works with them.
     """
     tess = Tesseract.from_tesseract_api(vectoradd_api_path, gpu_transport="cuda_ipc")
-    assert _resolve_gpu_transport(tess, torch.device("cpu")) == "none"
-    assert _resolve_gpu_transport(tess, torch.device("cuda")) == "cuda_ipc"
+    assert _resolve_gpu_transport(tess, has_cuda_tensors=False) == "none"
+    assert _resolve_gpu_transport(tess, has_cuda_tensors=True) == "cuda_ipc"
 
     a = torch.tensor([1.0, 2.0, 3.0])
     b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
@@ -201,7 +201,7 @@ def test_cpu_tensors_take_the_host_path(vectoradd_api_path):
 
 
 def test_in_process_transport_is_the_one_it_was_created_with(vectoradd_tess):
-    assert _resolve_gpu_transport(vectoradd_tess, torch.device("cuda")) == "none"
+    assert _resolve_gpu_transport(vectoradd_tess, has_cuda_tensors=True) == "none"
 
 
 def test_unsupported_transport_is_rejected(vectoradd_api_path, monkeypatch):
@@ -209,7 +209,7 @@ def test_unsupported_transport_is_rejected(vectoradd_api_path, monkeypatch):
     tess = Tesseract.from_tesseract_api(vectoradd_api_path)
     monkeypatch.setattr(tess, "resolve_gpu_transport", lambda: "nixl")
     with pytest.raises(ValueError, match="tesseract-torch cannot drive"):
-        _resolve_gpu_transport(tess, torch.device("cuda"))
+        _resolve_gpu_transport(tess, has_cuda_tensors=True)
 
 
 def test_with_gpu_transport_views_only_when_needed(vectoradd_api_path):

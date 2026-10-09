@@ -81,9 +81,8 @@ jobs:
       - name: Show GPU info
         run: |
           nvidia-smi
-          # Confirm Docker can see the GPU via the NVIDIA container runtime; the
-          # GPU tests serve a Tesseract from a container, so a broken runtime
-          # must fail loudly here.
+          # The GPU tests serve a Tesseract from a container, so fail here if
+          # Docker cannot see the GPU through the NVIDIA container runtime.
           docker info
           docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
 
