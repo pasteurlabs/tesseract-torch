@@ -16,7 +16,7 @@ cuda-pathfinder==1.8.3 ; python_full_version < '3.15' and sys_platform == 'linux
     # via cuda-bindings
 cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
     # via torch
-filelock==4.0.10
+filelock==4.1.1
     # via torch
 fsspec==2026.9.0
     # via torch
