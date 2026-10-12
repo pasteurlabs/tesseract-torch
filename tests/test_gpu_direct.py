@@ -38,19 +38,21 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     """The cuda_ipc path must match the host-copy path exactly.
 
     ``gpu_transport="none"`` overrides the transport the Tesseract was created
-    with, in both directions, so the baseline comes back as a host tensor.
+    with, in both directions. Over cuda_ipc the outputs stay on the device, and
+    through the host they come back on the CPU, the non-differentiable one as a
+    NumPy array.
     """
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
 
-    ipc = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
-    host = apply_tesseract(
-        served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="none"
-    )["c"]
+    ipc = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
+    host = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="none")
 
-    assert ipc.is_cuda
-    assert not host.is_cuda
-    np.testing.assert_array_equal(ipc.cpu().numpy(), host.numpy())
+    assert ipc["c"].is_cuda and not host["c"].is_cuda
+    np.testing.assert_array_equal(ipc["c"].cpu().numpy(), host["c"].numpy())
+    assert isinstance(ipc["c_sum"], torch.Tensor) and ipc["c_sum"].is_cuda
+    assert isinstance(host["c_sum"], np.ndarray)
+    np.testing.assert_array_equal(ipc["c_sum"].cpu().numpy(), host["c_sum"])
 
 
 def test_explicit_transport_on_client_without_one(served_gpu_tesseract):
@@ -130,9 +132,10 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
     """A non-differentiable output must not break the jvp path or force a host copy.
 
     ``c_sum`` is a non-differentiable output, so the jvp endpoint returns no
-    tangent for it and it comes back as-is (a host array) rather than a dual
-    tensor. Its presence must not disturb the differentiable output ``c``, whose
-    tangent must still come back correct and on-device under ``cuda_ipc``.
+    tangent for it and it comes back as a plain tensor, on the device cuda_ipc
+    delivered it to, rather than a dual tensor. Its presence must not disturb
+    the differentiable output ``c``, whose tangent must still come back correct
+    and on-device under ``cuda_ipc``.
     """
     import torch.autograd.forward_ad as fwAD
 
@@ -154,8 +157,9 @@ def test_jvp_with_nondiff_output(served_gpu_tesseract):
     # The non-differentiable c_sum output still comes back, matching the analytic
     # sum(c) = sum(a*2 + b).
     expected_c_sum = (a * 2.0 + b).sum().item()
+    assert out["c_sum"].is_cuda
     np.testing.assert_allclose(
-        np.asarray(out["c_sum"]).reshape(()), expected_c_sum, rtol=1e-6
+        out["c_sum"].cpu().numpy().reshape(()), expected_c_sum, rtol=1e-6
     )
 
 
@@ -261,3 +265,94 @@ def test_local_client_derivatives_with_named_transport(local_gpu_tesseract):
         _primal, tangent = fwAD.unpack_dual(out["c"])
     assert tangent.is_cuda
     np.testing.assert_allclose(tangent.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("tess_fixture", "gpu_transport"),
+    [("local_gpu_tesseract", "cuda_ipc"), ("served_gpu_tesseract", None)],
+)
+def test_inplace_change_before_backward_raises(request, tess_fixture, gpu_transport):
+    """An input modified in place after the forward pass raises in backward.
+
+    A device transport sends the input's own memory, so differentiating would
+    otherwise use the new values. ``mask`` scales the gradient, and is
+    non-differentiable, which must not exempt it.
+    """
+    tess = request.getfixturevalue(tess_fixture)
+    a = torch.arange(8, dtype=torch.float32, device="cuda", requires_grad=True)
+    b = torch.ones(8, dtype=torch.float32, device="cuda")
+    mask = torch.ones(8, dtype=torch.float32, device="cuda")
+
+    out = apply_tesseract(
+        tess, {"a": a, "b": b, "mask": mask}, gpu_transport=gpu_transport
+    )
+    mask.mul_(3)
+
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        out["c"].sum().backward()
+
+
+@pytest.mark.parametrize(
+    ("tess_fixture", "gpu_transport"),
+    [("local_gpu_tesseract", "cuda_ipc"), ("served_gpu_tesseract", None)],
+)
+def test_inputs_are_sent_in_the_declared_dtype(request, tess_fixture, gpu_transport):
+    """Float64 tensors reach a Float32 schema over cuda_ipc, as on the host path.
+
+    The transport does not cast on the device, so the inputs, the saved inputs
+    and the tangents are cast before they are sent. Gradients keep the input's
+    own dtype.
+    """
+    import torch.autograd.forward_ad as fwAD
+
+    tess = request.getfixturevalue(tess_fixture)
+    a = torch.arange(8, dtype=torch.float64, device="cuda", requires_grad=True)
+    b = torch.ones(8, dtype=torch.float64, device="cuda", requires_grad=True)
+
+    out = apply_tesseract(tess, {"a": a, "b": b}, gpu_transport=gpu_transport)
+    np.testing.assert_allclose(out["c"].detach().cpu().numpy(), np.arange(8) * 2.0 + 1)
+    out["c"].sum().backward()
+    assert a.grad.dtype == torch.float64 and a.grad.is_cuda
+    np.testing.assert_allclose(a.grad.cpu().numpy(), np.full(8, 2.0))
+    assert b.grad.dtype == torch.float64
+    np.testing.assert_allclose(b.grad.cpu().numpy(), np.ones(8))
+
+    with fwAD.dual_level():
+        a_dual = fwAD.make_dual(a.detach(), torch.ones_like(a))
+        out = apply_tesseract(
+            tess, {"a": a_dual, "b": b.detach()}, gpu_transport=gpu_transport
+        )
+        _primal, tangent = fwAD.unpack_dual(out["c"])
+    np.testing.assert_allclose(tangent.cpu().numpy(), np.full(8, 2.0))
+
+
+@pytest.mark.parametrize("gpu_transport", [None, "cuda_ipc"])
+def test_in_process_outputs_follow_the_data(local_gpu_tesseract, gpu_transport):
+    """Tensors an in-process endpoint returns stay where it computed them.
+
+    This endpoint computes on the GPU and returns tensors in-process, so even a
+    call with only CPU tensors gets its outputs on the GPU.
+    """
+    out = apply_tesseract(
+        local_gpu_tesseract,
+        {"a": torch.ones(3), "b": torch.ones(3)},
+        gpu_transport=gpu_transport,
+    )
+    assert out["c"].is_cuda
+    assert isinstance(out["c_sum"], torch.Tensor) and out["c_sum"].is_cuda
+    np.testing.assert_allclose(out["c_sum"].cpu().numpy(), [9.0])
+
+
+def test_negative_view_through_cuda_ipc(served_gpu_tesseract):
+    """A tensor with the negative bit set is sent with its values, not its storage.
+
+    ``.imag`` of a conjugate sets the bit. With a single element the view is
+    contiguous, so nothing else copies it before export.
+    """
+    base = torch.tensor([3.0], device="cuda")
+    a = torch.complex(torch.zeros_like(base), base).conj().imag
+    assert a.is_neg() and a.is_contiguous()
+    b = torch.zeros(1, dtype=torch.float32, device="cuda")
+
+    out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
+    np.testing.assert_allclose(out["c"].cpu().numpy(), [-6.0])

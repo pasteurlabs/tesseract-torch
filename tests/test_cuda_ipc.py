@@ -13,6 +13,8 @@ drives that API correctly.
 
 from __future__ import annotations
 
+import collections
+
 import numpy as np
 import pytest
 import torch
@@ -21,6 +23,7 @@ from tesseract_core.sdk.tesseract import HTTPClient
 
 from tesseract_torch import apply_tesseract
 from tesseract_torch.function import (
+    _adopt_device_arrays,
     _gpu_transport_mode,
     _resolve_gpu_transport,
     _supports_gpu_transport,
@@ -65,6 +68,13 @@ def test_to_tensor_readonly_numpy_array():
     t = _to_tensor(a)
     assert isinstance(t, torch.Tensor)
     assert torch.allclose(t, torch.tensor([1.0, 2.0]))
+
+
+def test_to_tensor_non_native_byte_order():
+    """Tensors only use native byte order, so a big-endian array is converted."""
+    a = np.arange(3, dtype=">f8")
+    t = _to_tensor(a)
+    assert torch.equal(t, torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64))
 
 
 def test_to_tensor_tensor_passthrough():
@@ -143,6 +153,34 @@ def test_tensor_to_numpy_or_cuda_cuda_tensor_on_device_passes_through():
     assert isinstance(out, torch.Tensor)
     assert out.is_cuda
     assert out.is_contiguous()
+
+
+def test_tensor_to_numpy_or_cuda_resolves_conjugate_views():
+    t = torch.tensor([1 + 2j, 3 - 4j]).conj()
+    assert t.is_conj()
+    np.testing.assert_array_equal(_tensor_to_numpy_or_cuda(t), [1 - 2j, 3 + 4j])
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tensor_to_numpy_or_cuda_resolves_views_on_device():
+    """A tensor exported by a device transport carries no negative or conjugate bit."""
+    t = torch.tensor([1 + 2j, 3 - 4j], device="cuda").conj()
+    out = _tensor_to_numpy_or_cuda(t, on_device=True)
+    assert not out.is_conj()
+    torch.testing.assert_close(out.cpu(), torch.tensor([1 - 2j, 3 + 4j]))
+    out = _tensor_to_numpy_or_cuda(t.imag, on_device=True)
+    assert not out.is_neg()
+    torch.testing.assert_close(out.cpu(), torch.tensor([-2.0, 4.0]))
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tensor_to_numpy_or_cuda_casts_to_the_declared_dtype_on_device():
+    """A device transport does not cast, so the tensor is sent in the schema's dtype."""
+    t = torch.tensor([1.0, 2.0], dtype=torch.float32, device="cuda")
+    out = _tensor_to_numpy_or_cuda(t, on_device=True, dtype=torch.float64)
+    assert out.dtype == torch.float64 and out.is_cuda
 
 
 def test_tensor_to_numpy_or_cuda_rejects_functional_tensors():
@@ -342,7 +380,60 @@ class TestCudaTensorWithoutDeviceTransport:
     """Without a device transport, CUDA tensors still take the host round-trip."""
 
     def test_cuda_tensor_forward_default(self, vectoradd_tess):
+        """The output follows the data, which came back through the host."""
         a = torch.tensor([1.0, 2.0, 3.0], device="cuda")
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
-        assert torch.allclose(result["c"].cpu(), torch.tensor([5.0, 7.0, 9.0]))
+        assert not result["c"].is_cuda
+        assert torch.allclose(result["c"], torch.tensor([5.0, 7.0, 9.0]))
+
+
+class _DeliveredDeviceArray:
+    """Stands in for the ``IpcDeviceArray`` a GPU transport delivers."""
+
+    def __init__(self, tensor: torch.Tensor) -> None:
+        self._tensor = tensor
+        self.__cuda_array_interface__ = tensor.__cuda_array_interface__
+
+    def __dlpack__(self, *args: object, **kwargs: object) -> object:
+        return torch.utils.dlpack.to_dlpack(self._tensor)
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        return self._tensor.__dlpack_device__()
+
+
+def test_nondiff_host_arrays_and_tensors_follow_the_data():
+    """Host arrays stay NumPy arrays and returned tensors stay where they are."""
+    a, t = np.arange(3.0), torch.ones(2)
+    strings = np.array(["x", "y"])
+    adopted = _adopt_device_arrays({"a": a, "t": t, "s": strings, "n": 1.5})
+    assert adopted["a"] is a
+    assert adopted["t"] is t
+    assert adopted["s"] is strings
+    assert adopted["n"] == 1.5
+
+
+def test_namedtuple_outputs_are_rebuilt():
+    point = collections.namedtuple("Point", "x y")
+    adopted = _adopt_device_arrays(point(np.ones(2), 1))
+    assert isinstance(adopted, point)
+    assert adopted.y == 1
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_nondiff_device_arrays_become_tensors_on_their_device():
+    """A device array the transport delivered is adopted without a copy."""
+    source = torch.arange(4.0, device="cuda")
+    point = collections.namedtuple("Point", "x y")
+    adopted = _adopt_device_arrays(
+        {
+            "d": _DeliveredDeviceArray(source),
+            "p": point(_DeliveredDeviceArray(source), 2),
+        }
+    )
+    assert adopted["d"].is_cuda
+    assert adopted["d"].data_ptr() == source.data_ptr()
+    assert adopted["p"].x.is_cuda and adopted["p"].y == 2
+    cuda_tensor = torch.ones(2, device="cuda")
+    assert _adopt_device_arrays(cuda_tensor) is cuda_tensor

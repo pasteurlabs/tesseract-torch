@@ -100,6 +100,18 @@ class TestTorchFuncTransformsRejected:
                 lambda p: apply_tesseract(vectoradd_tess, {"a": p, "b": b})["c"].sum()
             )(params)
 
+    def test_batched_backward_raises(self, nonlinear_tess):
+        """Batched cotangents have no storage either, and get the same error."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+
+        with pytest.raises(RuntimeError, match=r"does not support torch\.func"):
+            torch.autograd.functional.jacobian(
+                lambda a_: apply_tesseract(nonlinear_tess, {"a": a_, "b": b})["y"],
+                a,
+                vectorize=True,
+            )
+
     def test_error_message_suggests_alternatives(self, vectoradd_tess):
         params = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
@@ -316,6 +328,23 @@ class TestInputTypeVariations:
         result["c"].sum().backward()
         assert torch.allclose(a.grad, torch.ones(3), atol=1e-4)
 
+    def test_negative_view_input(self, nonlinear_tess):
+        """A tensor with the negative bit set, as ``.imag`` of a conjugate is, works.
+
+        Neither NumPy nor a device transport can represent the lazy bit.
+        """
+        base = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        zeros = torch.zeros(3, dtype=torch.float64)
+        a = torch.complex(zeros, base).conj().imag
+        assert a.is_neg()
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        a_ref = -base.detach()
+        torch.testing.assert_close(y, a_ref**3 + b * a_ref)
+        y.sum().backward()
+        torch.testing.assert_close(base.grad, -(3 * a_ref**2 + b))
+
     def test_python_list_for_non_diff(self, vectoradd_tess):
         """Python lists for non-differentiable inputs work."""
         a = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
@@ -355,18 +384,32 @@ class TestAutogradGraphIntegrity:
         result["c"].sum().backward()
         assert torch.allclose(grad1, a.grad)
 
-    def test_higher_order_grad_not_supported(self, vectoradd_tess):
-        """Higher-order gradients via create_graph are not supported.
+    def test_higher_order_grad_not_supported(self, nonlinear_tess):
+        """Differentiating a gradient through a Tesseract raises.
 
-        The VJP/JVP calls are opaque to autograd, so the backward pass itself
-        is not differentiable. This is a known limitation.
+        The VJP call is opaque to autograd, so the backward pass itself is not
+        differentiable. With another term in the loss, a second derivative
+        must not silently leave out the Tesseract's share. The first-order
+        gradient taken with create_graph=True is still correct.
         """
-        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, requires_grad=True)
-        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-        result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
-        (grad_a,) = torch.autograd.grad(result["c"].sum(), a, create_graph=True)
-        with pytest.raises(RuntimeError, match="does not require grad"):
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        loss = y.sum() + (a**3).sum()
+        (grad_a,) = torch.autograd.grad(loss, a, create_graph=True)
+        torch.testing.assert_close(grad_a, 6 * a.detach() ** 2 + b)
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
             torch.autograd.grad(grad_a.sum(), a)
+
+    def test_higher_order_grad_wrt_cotangent_not_supported(self, nonlinear_tess):
+        """The gradient depends on the cotangent too, which must not be dropped either."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        v = torch.ones(3, dtype=torch.float64, requires_grad=True)
+        (grad_a,) = torch.autograd.grad(y, a, v, create_graph=True)
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
+            torch.autograd.grad(grad_a.sum(), v)
 
     def test_chained_tesseracts(self, vectoradd_tess):
         """Two chained apply_tesseract calls propagate gradients correctly."""
@@ -402,8 +445,8 @@ class TestCUDA:
         """CUDA tensors support backward pass, with the gradient on the same device.
 
         Regression test: the VJP result is decoded from the Tesseract's
-        response (always host memory here, since this call doesn't opt into a
-        device transport), but autograd requires the gradient returned for a CUDA
+        response (always host memory here, since this Tesseract uses no device
+        transport), but autograd requires the gradient returned for a CUDA
         input to itself be a CUDA tensor -- returning a CPU tensor raises
         "invalid gradient ... expected device cuda:0 but got cpu".
         """
