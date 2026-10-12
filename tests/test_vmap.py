@@ -375,6 +375,50 @@ def test_device_array_output_is_batched(batched_tess, monkeypatch, method):
     torch.testing.assert_close(z, a + torch.from_numpy(c))
 
 
+@pytest.mark.parametrize("method", METHODS)
+def test_non_native_byte_order_output_is_batched(batched_tess, monkeypatch, method):
+    a, b, c = _data()
+    endpoint = batched_tess.apply
+
+    def apply(inputs):
+        out = endpoint(inputs)
+        z = np.asarray(out["extras"]["z"])
+        out["extras"]["z"] = z.astype(z.dtype.newbyteorder())
+        return out
+
+    monkeypatch.setattr(batched_tess, "apply", apply)
+
+    z = torch.vmap(lambda x: _call(batched_tess, x, b, c, method)["extras"]["z"])(a)
+    torch.testing.assert_close(z, a + torch.from_numpy(c))
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_array_output_torch_cannot_hold_is_returned_once(
+    batched_tess, monkeypatch, method
+):
+    """An array of a dtype torch lacks, such as strings, is returned as it is."""
+    a, b, c = _data()
+    endpoint = batched_tess.apply
+    labels = np.array(["x", "y"])
+
+    def apply(inputs):
+        out = endpoint(inputs)
+        out["tags"] = labels
+        return out
+
+    monkeypatch.setattr(batched_tess, "apply", apply)
+    seen = []
+
+    def f(x):
+        out = _call(batched_tess, x, b, c, method)
+        seen.append(out["tags"])
+        return out["y"]
+
+    torch.vmap(f)(a)
+    assert len(seen) == 1
+    np.testing.assert_array_equal(seen[0], labels)
+
+
 def test_nested_schema_sequential(nested_tess):
     """Fixed shapes, nested models and 0-d outputs, one call per element."""
     vs = torch.arange(B * 3, dtype=torch.float32).reshape(B, 3)
