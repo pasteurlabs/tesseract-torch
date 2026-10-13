@@ -104,7 +104,11 @@ def test_backward_drops_zero_cotangent(nested_tess, tmp_path, monkeypatch):
 
 
 def test_backward_with_only_zero_cotangents_skips_vjp(nested_tess, monkeypatch):
-    """Every cotangent zero -> the VJP is skipped and every grad stays None."""
+    """Every cotangent zero -> the VJP is skipped and every grad is zero.
+
+    The gradients must be zeros rather than None, which autograd reads as an
+    unused input, so torch.autograd.grad would fail and .grad would stay unset.
+    """
 
     def _no_vjp(**kwargs):
         raise AssertionError("VJP called despite all-zero cotangents")
@@ -114,10 +118,15 @@ def test_backward_with_only_zero_cotangents_skips_vjp(nested_tess, monkeypatch):
     a = torch.tensor(5.0, requires_grad=True)
     v = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
     out = apply_tesseract(nested_tess, _inputs(a, v))
-    (0.0 * out["scalars"]["a"] + 0.0 * out["vectors"]["v"].sum()).backward()
+    loss = 0.0 * out["scalars"]["a"] + 0.0 * out["vectors"]["v"].sum()
 
-    assert a.grad is None
-    assert v.grad is None
+    grad_a, grad_v = torch.autograd.grad(loss, (a, v), retain_graph=True)
+    assert torch.equal(grad_a, torch.zeros(()))
+    assert torch.equal(grad_v, torch.zeros(3))
+
+    loss.backward()
+    assert torch.equal(a.grad, torch.zeros(()))
+    assert torch.equal(v.grad, torch.zeros(3))
 
 
 @pytest.mark.parametrize(
@@ -154,6 +163,46 @@ def test_backward_requests_only_inputs_requiring_grad(
         assert torch.allclose(v.grad, 10.0 * torch.ones(3), atol=1e-4)
     else:
         assert v.grad is None
+
+
+@pytest.mark.parametrize("cotangent_scale", [1.0, 0.0])
+def test_backward_returns_none_for_inputs_not_requiring_grad(
+    nested_tess, monkeypatch, cotangent_scale
+):
+    """An input that does not require grad gets None, not a zero gradient.
+
+    Autograd discards either one, so .grad cannot tell them apart; this checks
+    what backward() returns, with the VJP called and with it skipped.
+    """
+    returned = []
+    backward = _TesseractFunction.backward
+
+    def _recording_backward(ctx, *grad_outputs):
+        grads = backward(ctx, *grad_outputs)
+        n_wires = len(ctx.diff_input_wires)
+        returned.append(
+            dict(
+                zip(
+                    ctx.diff_input_wires,
+                    grads[_N_NON_TENSOR_ARGS : _N_NON_TENSOR_ARGS + n_wires],
+                    strict=True,
+                )
+            )
+        )
+        return grads
+
+    monkeypatch.setattr(
+        _TesseractFunction, "backward", staticmethod(_recording_backward)
+    )
+
+    a = torch.tensor(5.0)
+    v = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+    out = apply_tesseract(nested_tess, _inputs(a, v))
+    (cotangent_scale * (out["scalars"]["a"] + out["vectors"]["v"].sum())).backward()
+
+    (grads,) = returned
+    assert grads["scalars.a"] is None
+    assert torch.allclose(grads["vectors.v"], 10.0 * cotangent_scale * torch.ones(3))
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +280,10 @@ def test_jvp_moves_tangents_to_output_device(nested_tess, monkeypatch):
         diff_output_specs=[(torch.Size([3]), torch.float32, torch.device("meta"))],
         gpu_transport="none",
         on_device=False,
-        saved_inputs={},
+        static_inputs={},
+        tensor_paths=[("x",)],
+        tensor_dtypes=[None],
+        saved_tensors=(torch.ones(3),),
     )
 
     (tangent,) = _TesseractFunction.jvp(

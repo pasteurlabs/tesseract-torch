@@ -16,6 +16,7 @@ the point shows up in the answer and that mutation fails here.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from tesseract_torch import apply_tesseract
@@ -52,6 +53,21 @@ def test_gradient_changes_with_the_evaluation_point(nonlinear_tess):
         grads.append(a.grad.numpy().copy())
 
     assert not np.allclose(grads[0], grads[1])
+
+
+def test_inplace_change_before_backward_raises(nonlinear_tess):
+    """An input modified in place after the forward pass must not be differentiated at.
+
+    Like any autograd op that saves its inputs, the backward pass raises rather
+    than linearizing at the new values, e.g. after an optimizer step.
+    """
+    a, b = _inputs()
+    out = apply_tesseract(nonlinear_tess, {"a": a, "b": b})
+    with torch.no_grad():
+        a.mul_(10)
+
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        out["y"].sum().backward()
 
 
 def test_forward_mode_agrees_with_reverse_mode(nonlinear_tess):
