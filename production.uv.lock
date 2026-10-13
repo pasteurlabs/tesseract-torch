@@ -3429,7 +3429,7 @@ requires-dist = [
     { name = "tesseract-core", specifier = ">=1.14.0" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'" },
-    { name = "torch", specifier = ">=2.0" },
+    { name = "torch", specifier = ">=2.3" },
     { name = "typeguard", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "docs"]

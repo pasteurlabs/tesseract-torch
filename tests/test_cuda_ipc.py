@@ -13,8 +13,6 @@ drives that API correctly.
 
 from __future__ import annotations
 
-import collections
-
 import numpy as np
 import pytest
 import torch
@@ -413,27 +411,20 @@ def test_nondiff_host_arrays_and_tensors_follow_the_data():
     assert adopted["n"] == 1.5
 
 
-def test_namedtuple_outputs_are_rebuilt():
-    point = collections.namedtuple("Point", "x y")
-    adopted = _adopt_device_arrays(point(np.ones(2), 1))
-    assert isinstance(adopted, point)
-    assert adopted.y == 1
-
-
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_nondiff_device_arrays_become_tensors_on_their_device():
     """A device array the transport delivered is adopted without a copy."""
     source = torch.arange(4.0, device="cuda")
-    point = collections.namedtuple("Point", "x y")
     adopted = _adopt_device_arrays(
         {
             "d": _DeliveredDeviceArray(source),
-            "p": point(_DeliveredDeviceArray(source), 2),
+            "p": (_DeliveredDeviceArray(source), 2),
         }
     )
     assert adopted["d"].is_cuda
     assert adopted["d"].data_ptr() == source.data_ptr()
-    assert adopted["p"].x.is_cuda and adopted["p"].y == 2
+    assert isinstance(adopted["p"], tuple)
+    assert adopted["p"][0].is_cuda and adopted["p"][1] == 2
     cuda_tensor = torch.ones(2, device="cuda")
     assert _adopt_device_arrays(cuda_tensor) is cuda_tensor

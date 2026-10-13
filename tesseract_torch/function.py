@@ -143,9 +143,7 @@ def _adopt_device_arrays(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _adopt_device_arrays(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        items = (_adopt_device_arrays(item) for item in value)
-        # A namedtuple takes its fields as separate arguments.
-        return type(value)(*items) if hasattr(value, "_fields") else type(value)(items)
+        return type(value)(_adopt_device_arrays(item) for item in value)
     if not isinstance(value, torch.Tensor) and hasattr(
         value, "__cuda_array_interface__"
     ):
@@ -649,28 +647,28 @@ class _TesseractFunction(torch.autograd.Function):
         }
         active_wires = list(cotangent_vector)
 
-        # Request gradients only for inputs that require grad, since a
-        # finite-difference VJP pays per input element. Every tensor on a
-        # differentiable path reaches forward() because it may carry a
-        # forward-mode tangent, so some of them need no gradient here.
-        # needs_input_grad reflects requires_grad at forward time, so an input
-        # left out of autograd.grad(inputs=...) is still requested.
         needs_grad = ctx.needs_input_grad[
             _N_NON_TENSOR_ARGS : _N_NON_TENSOR_ARGS + len(ctx.diff_input_wires)
         ]
-        needed_wires = [
-            wire
-            for wire, needed in zip(ctx.diff_input_wires, needs_grad, strict=True)
-            if needed
-        ]
 
-        # With all cotangents zero, all gradients are zero and the Tesseract is
-        # skipped. They are returned as explicit zeros, because autograd reads
-        # None as an unused input, which fails torch.autograd.grad and leaves
-        # .grad unset.
+        # With all cotangents zero, all gradients are zero and the Tesseract
+        # VJP call is skipped. They are returned as explicit zeros, because
+        # autograd reads None as an unused input, which fails
+        # torch.autograd.grad and leaves .grad unset.
         if not active_wires:
             vjp_result = {}
         else:
+            # Request gradients only for inputs that require grad, since a
+            # finite-difference VJP pays per input element. Every tensor on a
+            # differentiable path reaches forward() because it may carry a
+            # forward-mode tangent, so some of them need no gradient here.
+            # needs_input_grad reflects requires_grad at forward time, so an
+            # input left out of autograd.grad(inputs=...) is still requested.
+            needed_wires = [
+                wire
+                for wire, needed in zip(ctx.diff_input_wires, needs_grad, strict=True)
+                if needed
+            ]
             with _gpu_transport_mode(ctx.tesseract, ctx.gpu_transport):
                 vjp_result = ctx.tesseract.vector_jacobian_product(
                     inputs=_unflatten_pytree(_saved_inputs(ctx, saved_tensors)),

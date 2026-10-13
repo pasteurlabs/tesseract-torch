@@ -165,6 +165,46 @@ def test_backward_requests_only_inputs_requiring_grad(
         assert v.grad is None
 
 
+@pytest.mark.parametrize("cotangent_scale", [1.0, 0.0])
+def test_backward_returns_none_for_inputs_not_requiring_grad(
+    nested_tess, monkeypatch, cotangent_scale
+):
+    """An input that does not require grad gets None, not a zero gradient.
+
+    Autograd discards either one, so .grad cannot tell them apart; this checks
+    what backward() returns, with the VJP called and with it skipped.
+    """
+    returned = []
+    backward = _TesseractFunction.backward
+
+    def _recording_backward(ctx, *grad_outputs):
+        grads = backward(ctx, *grad_outputs)
+        n_wires = len(ctx.diff_input_wires)
+        returned.append(
+            dict(
+                zip(
+                    ctx.diff_input_wires,
+                    grads[_N_NON_TENSOR_ARGS : _N_NON_TENSOR_ARGS + n_wires],
+                    strict=True,
+                )
+            )
+        )
+        return grads
+
+    monkeypatch.setattr(
+        _TesseractFunction, "backward", staticmethod(_recording_backward)
+    )
+
+    a = torch.tensor(5.0)
+    v = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+    out = apply_tesseract(nested_tess, _inputs(a, v))
+    (cotangent_scale * (out["scalars"]["a"] + out["vectors"]["v"].sum())).backward()
+
+    (grads,) = returned
+    assert grads["scalars.a"] is None
+    assert torch.allclose(grads["vectors.v"], 10.0 * cotangent_scale * torch.ones(3))
+
+
 # ---------------------------------------------------------------------------
 # Forward mode
 # ---------------------------------------------------------------------------
