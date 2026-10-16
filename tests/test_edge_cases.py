@@ -553,6 +553,14 @@ class TestPathHelpers:
         assert _wire_name(("x",), {"x"}) == "x"
         assert _wire_name(("nope",), {"params.{}"}) is None
 
+    def test_wire_name_escapes_braces_and_backslashes_in_the_key(self):
+        from tesseract_torch.function import _wire_name
+
+        assert _wire_name(("params", "a{b}"), {"params.{}"}) == r"params.{a\{b\}}"
+        assert _wire_name(("params", "a\\b"), {"params.{}"}) == r"params.{a\\b}"
+        # A key spelled like the wildcard is still a concrete key.
+        assert _wire_name(("params", "{}"), {"params.{}"}) == r"params.{\{\}}"
+
     @pytest.mark.parametrize(
         "path,value,known,expected",
         [
@@ -573,11 +581,11 @@ class TestPathHelpers:
 
 
 class TestDottedDictKeys:
-    """A dict key is free to contain a dot, and the key is where the path ends."""
+    """A dict key may hold dots, braces and backslashes, and still ends the path."""
 
     @pytest.mark.parametrize(
         "key",
-        ["plain", "a/b", "a:b", "layer.0.weight"],
+        ["plain", "a/b", "a:b", "layer.0.weight", "a{b", "a}b", "{}", "a\\b"],
     )
     def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
         """Joining segments and splitting again drops the dotted key.
