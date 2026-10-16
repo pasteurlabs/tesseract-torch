@@ -23,7 +23,7 @@ The Tesseract must run tesseract-core 1.15 or newer, since the `cuda_ipc` wire f
 The first call with CUDA tensors asks the Tesseract which transport to use (via `Tesseract.resolve_gpu_transport`). This checks once per connection that the transport works between your process and the server by exchanging a small GPU array.
 
 - A Tesseract created with `gpu_transport="cuda_ipc"` uses it. If it does not work from your process, the call raises with the reason.
-- A Tesseract that requests no transport, such as one from `Tesseract.from_url`, uses `cuda_ipc` if the server offers it and it works. Otherwise its tensors are copied through the host, with a one-time warning saying why. This happens, for example, when the server runs on another machine.
+- A Tesseract that requests no transport, such as one from `Tesseract.from_url`, uses `cuda_ipc` if the server offers it and it works from your process. If the server offers it but it does not work, for example because the server runs on another machine, its tensors are copied through the host with a one-time warning saying why. A server that offers no GPU transport, such as one started by `Tesseract.from_source` or `Tesseract.from_image` without `gpu_transport`, gets host copies without a warning.
 - Calls with only CPU tensors always go through the host and never run the check.
 
 To always copy CUDA tensors through the host, pass a view of the Tesseract:
