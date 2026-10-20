@@ -26,6 +26,11 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    env:
+      # Without this, uv may pick up another Python on the runner (such as
+      # Homebrew's on macOS) instead of the one set up below.
+      UV_PYTHON: ${{ matrix.python-version }}
+
     defaults:
       run:
         shell: bash -el {0}
