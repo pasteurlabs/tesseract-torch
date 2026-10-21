@@ -101,11 +101,24 @@ jobs:
           cp production.uv.lock uv.lock
           uv sync --python 3.12 --extra dev --frozen
 
-      - name: Show installed CUDA framework
+      # CuPy is not a dependency, but some GPU tests serve a Tesseract that
+      # computes with it on this interpreter, so install the build for the CUDA
+      # major PyTorch was built against.
+      - name: Install CuPy
+        run: |
+          cuda_major=$(uv run --no-sync python -c "import torch; print(torch.version.cuda.split('.')[0])")
+          uv pip install "cupy-cuda${cuda_major}x[ctk]"
+
+      - name: Show installed CUDA frameworks
         run: |
           uv run --no-sync python -c "import torch; print('torch', torch.__version__, 'cuda available', torch.cuda.is_available(), 'devices', torch.cuda.device_count())"
+          uv run --no-sync python -c "import cupy; print('cupy', cupy.__version__, 'devices', cupy.cuda.runtime.getDeviceCount())"
 
+      # TESSERACT_TORCH_GPU_REQUIRED=1 turns a missing GPU or CuPy into a test
+      # failure, so no GPU test can pass here by skipping.
       - name: Run GPU test suite
+        env:
+          TESSERACT_TORCH_GPU_REQUIRED: "1"
         run: |
           set -o pipefail
           uv run --no-sync pytest \

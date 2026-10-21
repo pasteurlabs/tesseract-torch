@@ -1,6 +1,6 @@
-name: "tesseract-torch-gpu-container"
+name: "tesseract-torch-gpu"
 version: "0.1.0"
-description: "Computes 2a + b on the GPU if it sees one, for the container GPU tests."
+description: "Computes (a * scale + b) * mask with NumPy or CuPy, for the container GPU tests."
 
 build_config:
   # libcudart comes from the CuPy wheel, and the GPU driver is injected by the

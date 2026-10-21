@@ -4,10 +4,12 @@
 """End-to-end tests of ``apply_tesseract`` over the ``cuda_ipc`` transport.
 
 The ``served_gpu_tesseract`` fixture is created with ``gpu_transport="cuda_ipc"``,
-which ``apply_tesseract`` uses for CUDA tensors. The ``local_*`` tests load the
-same Tesseract in-process, where one created with ``gpu_transport="cuda_ipc"``
-hands its endpoints CUDA tensors as they are. All tests are marked ``gpu``, and
-the fixtures skip where no CUDA GPU is available.
+which ``apply_tesseract`` uses for CUDA tensors, and runs once with a Tesseract
+computing with PyTorch and once with one computing with CuPy. It fails any call
+that copies an input or output through the host. The ``local_*`` tests load the
+same Tesseract in-process, computing with PyTorch, where one created with
+``gpu_transport="cuda_ipc"`` hands its endpoints CUDA tensors as they are. All
+tests are marked ``gpu``.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
     )
 
 
-def test_apply_matches_host_path(served_gpu_tesseract):
+def test_apply_matches_host_path(served_gpu_tesseract_allowing_host_copies):
     """The cuda_ipc path must match the host-copy path exactly.
 
     A view requesting ``gpu_transport="none"`` overrides the transport the
@@ -49,8 +51,9 @@ def test_apply_matches_host_path(served_gpu_tesseract):
     a = torch.linspace(-5, 5, 257, dtype=torch.float32, device="cuda")
     b = torch.linspace(10, -10, 257, dtype=torch.float32, device="cuda")
 
-    ipc = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
-    host_view = served_gpu_tesseract.with_encoding(gpu_transport="none")
+    tess = served_gpu_tesseract_allowing_host_copies
+    ipc = apply_tesseract(tess, {"a": a, "b": b})
+    host_view = tess.with_encoding(gpu_transport="none")
     host = apply_tesseract(host_view, {"a": a, "b": b})
 
     assert ipc["c"].is_cuda and not host["c"].is_cuda
@@ -283,8 +286,6 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
     while gradients still reach the inputs' device. The client that requested
     cuda_ipc gets an error instead of a silent host copy.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("no CUDA GPU available")
     api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
     # Only the server is spawned without the GPU. The test process reads
     # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
@@ -313,7 +314,12 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "tess_fixture", ["local_cuda_ipc_gpu_tesseract", "served_gpu_tesseract"]
+    "tess_fixture",
+    [
+        "local_cuda_ipc_gpu_tesseract",
+        "served_torch_gpu_tesseract",
+        "served_cupy_gpu_tesseract",
+    ],
 )
 def test_inplace_change_before_backward_raises(request, tess_fixture):
     """An input modified in place after the forward pass raises in backward.
@@ -335,7 +341,12 @@ def test_inplace_change_before_backward_raises(request, tess_fixture):
 
 
 @pytest.mark.parametrize(
-    "tess_fixture", ["local_cuda_ipc_gpu_tesseract", "served_gpu_tesseract"]
+    "tess_fixture",
+    [
+        "local_cuda_ipc_gpu_tesseract",
+        "served_torch_gpu_tesseract",
+        "served_cupy_gpu_tesseract",
+    ],
 )
 def test_inputs_are_sent_in_the_declared_dtype(request, tess_fixture):
     """Float64 tensors reach a Float32 schema over cuda_ipc, as on the host path.

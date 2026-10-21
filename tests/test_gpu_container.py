@@ -29,14 +29,12 @@ here = Path(__file__).parent
 
 @pytest.fixture(scope="module")
 def gpu_container_image() -> str:
-    """Build the container test Tesseract once. Skips without a CUDA GPU."""
-    if not torch.cuda.is_available():
-        pytest.skip("no CUDA GPU available")
+    """Build the GPU Tesseract into an image once."""
     from tesseract_core.sdk.engine import build_tesseract
 
     # The image name comes from the Tesseract's config, the tag from here
-    build_tesseract(here / "gpu_container_tesseract", "test")
-    return "tesseract-torch-gpu-container:test"
+    build_tesseract(here / "gpu_tesseract", "test")
+    return "tesseract-torch-gpu:test"
 
 
 @pytest.mark.parametrize("client", ["served", "from_url"])
@@ -45,14 +43,19 @@ def test_container_round_trip_stays_on_device(gpu_container_image, client):
 
     The client that served the container requests cuda_ipc, and a ``from_url``
     client of it requests nothing and picks cuda_ipc once it checked that it
-    works. The container forbids host copies of GPU arrays, so passing rules out
-    a host copy on its side.
+    works. The container computes with CuPy and fails a call whose inputs
+    arrive in host memory or whose outputs would be copied to the host, so
+    passing rules out a host copy on either side.
     """
     with Tesseract.from_image(
         gpu_container_image,
         gpus=["all"],
         gpu_transport="cuda_ipc",
-        environment={"TESSERACT_FORBID_DEVICE_HOST_COPY": "1"},
+        environment={
+            "TESSERACT_TORCH_TEST_ARRAY_MODULE": "cupy",
+            "TESSERACT_TORCH_TEST_REJECT_HOST_INPUTS": "1",
+            "TESSERACT_FORBID_DEVICE_HOST_COPY": "1",
+        },
     ) as served:
         tess = served if client == "served" else Tesseract.from_url(served._client.url)
         a = torch.arange(64, dtype=torch.float32, device="cuda", requires_grad=True)
@@ -72,17 +75,20 @@ def test_container_round_trip_stays_on_device(gpu_container_image, client):
 def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
     """A container offering cuda_ipc that it cannot use leads to host copies.
 
-    A ``from_url`` client, which requests no transport, falls back to host
-    copies with a warning, so its outputs come back on the CPU while gradients
-    still reach the inputs' device.
-    The client that requested cuda_ipc gets an error instead of a silent host
-    copy.
+    The container cannot see the GPU, and computes with NumPy. A ``from_url``
+    client, which requests no transport, falls back to host copies with a
+    warning, so its outputs come back on the CPU while gradients still reach the
+    inputs' device. The client that requested cuda_ipc gets an error instead of
+    a silent host copy.
     """
     with Tesseract.from_image(
         gpu_container_image,
         gpus=["all"],
         gpu_transport="cuda_ipc",
-        environment={"CUDA_VISIBLE_DEVICES": ""},
+        environment={
+            "TESSERACT_TORCH_TEST_ARRAY_MODULE": "numpy",
+            "CUDA_VISIBLE_DEVICES": "",
+        },
     ) as served:
         remote = Tesseract.from_url(served._client.url)
         a = torch.arange(8, dtype=torch.float32, device="cuda", requires_grad=True)

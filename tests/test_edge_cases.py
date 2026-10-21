@@ -432,7 +432,6 @@ class TestAutogradGraphIntegrity:
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestCUDA:
     def test_cuda_tensor_forward(self, vectoradd_tess):
         """CUDA tensors are handled (converted to CPU internally)."""
