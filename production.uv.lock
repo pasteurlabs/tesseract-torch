@@ -3459,7 +3459,7 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-opengraph", marker = "extra == 'dev'" },
     { name = "sphinxext-opengraph", marker = "extra == 'docs'" },
-    { name = "tesseract-core", specifier = ">=1.14.0" },
+    { name = "tesseract-core", specifier = ">=1.15.0" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'" },
     { name = "torch", specifier = ">=2.3" },

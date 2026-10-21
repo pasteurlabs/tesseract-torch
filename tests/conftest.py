@@ -80,6 +80,21 @@ def local_gpu_tesseract():
     return Tesseract.from_tesseract_api(here / "gpu_tesseract" / "tesseract_api.py")
 
 
+@pytest.fixture(scope="module")
+def local_cuda_ipc_gpu_tesseract():
+    """The GPU Tesseract in-process, created to take CUDA tensors as they are.
+
+    Skips without a CUDA GPU.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA GPU available")
+    return Tesseract.from_tesseract_api(
+        here / "gpu_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
+
+
 # ---------------------------------------------------------------------------
 # GPU (cuda_ipc) serving
 # ---------------------------------------------------------------------------
