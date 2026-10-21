@@ -580,18 +580,17 @@ class TestPathHelpers:
         assert _should_recurse(path, value, known) is expected
 
 
-class TestDottedDictKeys:
-    """A dict key may hold dots, braces and backslashes, and still ends the path."""
+class TestSpecialCharDictKeys:
+    """Dict keys may contain path syntax (dots, braces, backslashes)."""
 
     @pytest.mark.parametrize(
         "key",
         ["plain", "a/b", "a:b", "layer.0.weight", "a{b", "a}b", "{}", "a\\b"],
     )
-    def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
-        """Joining segments and splitting again drops the dotted key.
+    def test_gradient_reaches_dict_key(self, dict_key_tess, key):
+        """Each value is a literal key in ``{"params": {key: x}}``, not a path.
 
-        It never gets a wire name, so its tensor is never registered for
-        autograd and backward reports that nothing requires grad.
+        Gradients must flow back to ``x`` whatever characters the key contains.
         """
         x = torch.ones(3, requires_grad=True)
         apply_tesseract(dict_key_tess, {"params": {key: x}})["result"].sum().backward()
