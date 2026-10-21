@@ -341,8 +341,8 @@ def _should_recurse(
 # tesseract-core encodes a container-valued differentiable field as a template
 # rather than a concrete path: ``dict[str, Differentiable[...]]`` is declared as
 # ``params.{}``. The wire name the runtime accepts puts the concrete key in the
-# braces, ``params.{p}``, because its own path regex compiles the sentinel to
-# ``\{[^.]+\}``. Neither ``params.p`` nor ``params.{}`` is accepted.
+# braces, ``params.{p}``, with any ``{``, ``}`` or ``\`` in the key escaped by a
+# backslash. Neither ``params.p`` nor ``params.{}`` is accepted.
 #
 # So a concrete leaf path and the name used to talk to the Tesseract are not
 # the same string, and both are needed: the concrete path rebuilds the input
@@ -352,16 +352,17 @@ _DICT_WILDCARD = "{}"
 _LIST_WILDCARD = "[]"
 
 
+def _escape_dict_key(key: str) -> str:
+    """Escape the characters that would otherwise end a ``{...}`` wire segment."""
+    return "".join("\\" + c if c in "{}\\" else c for c in key)
+
+
 def _wire_name(concrete_parts: KeyType, templates: set[str]) -> str | None:
     """Map a concrete leaf path to the name the Tesseract expects.
 
     Returns ``None`` when no declared path covers it, which is how the caller
     tells a differentiable leaf from a static one.
     """
-    joined = ".".join(str(part) for part in concrete_parts)
-    if joined in templates:
-        return joined
-
     for template in templates:
         template_parts = template.split(".")
         if len(template_parts) != len(concrete_parts):
@@ -369,7 +370,7 @@ def _wire_name(concrete_parts: KeyType, templates: set[str]) -> str | None:
         resolved: list[str] = []
         for tpl, concrete in zip(template_parts, concrete_parts, strict=True):
             if tpl == _DICT_WILDCARD and isinstance(concrete, str):
-                resolved.append("{" + concrete + "}")
+                resolved.append("{" + _escape_dict_key(concrete) + "}")
             elif tpl == _LIST_WILDCARD and isinstance(concrete, int):
                 resolved.append(f"[{concrete}]")
             elif tpl != concrete:
