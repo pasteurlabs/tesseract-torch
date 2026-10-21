@@ -34,9 +34,9 @@ _SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 def _resolve_gpu_transport(tesseract: Tesseract, *, has_cuda_tensors: bool) -> str:
     """Return the transport a call uses, either ``"none"`` or a device transport.
 
-    Only a call with CUDA tensors asks the Tesseract (see
-    ``Tesseract.resolve_gpu_transport``), since that may run a check against
-    the server.
+    Only a call with CUDA tensors asks the Tesseract which transport to use
+    (``Tesseract.resolve_gpu_transport``), because answering may require a
+    request to the server.
     """
     if not has_cuda_tensors:
         return "none"
@@ -67,9 +67,10 @@ def _validate_vmap_method(vmap_method: str | None) -> None:
 def _with_gpu_transport(tesseract: Tesseract, gpu_transport: str) -> Tesseract:
     """``tesseract``, or a view of it, whose calls use ``gpu_transport``.
 
-    In-process Tesseracts encode nothing and are returned unchanged. The view is
-    taken per call rather than stored, because it keeps the connection it was
-    taken from, and the Tesseract may be served again before backward() runs.
+    In-process Tesseracts (created via ``from_tesseract_api``) encode nothing
+    and are returned unchanged. The view is taken per call rather than stored,
+    because it keeps the connection it was taken from, and the Tesseract may be
+    served again before backward() runs.
     """
     if tesseract.server_capabilities is None:
         return tesseract
