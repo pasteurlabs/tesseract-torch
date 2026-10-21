@@ -3,7 +3,7 @@
 ## Quick start
 
 ```{note}
-Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.12+).
 ```
 
 ```{seealso}
@@ -54,6 +54,17 @@ For more detailed installation instructions, please refer to the [Tesseract Core
        _, tangent = fwAD.unpack_dual(result["vector_add"]["result"])
    ```
 
+````{tip}
+To skip Docker, serve the Tesseract from its source directory in a subprocess instead of building an image:
+
+```python
+t = Tesseract.from_source("tesseract-torch/examples/simple/vectoradd_torch/tesseract_api.py")
+t.serve()
+```
+
+This builds a virtual environment from the Tesseract's requirements next to `tesseract_api.py` on first use (which needs [`uv`](https://docs.astral.sh/uv/)), or runs on an existing interpreter passed as `python_executable=...`. Unlike a container, it is not isolated from your environment and filesystem.
+````
+
 ```{tip}
 Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-torch/tree/main/examples) for ways to use Tesseract-Torch.
 ```
@@ -64,4 +75,8 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
 
 - **Non-differentiable inputs/outputs**: Only inputs and outputs marked as `Differentiable[...]` in the Tesseract schema participate in gradient computation. See the [Handling Differentiability](handling-differentiability.md) page for details.
 
-- **`torch.func` transforms are not supported**: `apply_tesseract` works with PyTorch's standard autograd API (`.backward()`, `torch.autograd.grad`, `torch.autograd.forward_ad`), but **not** with `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.vmap`). These transforms create functionalized tensors that cannot be converted to NumPy arrays, which Tesseract endpoints require. Calling `apply_tesseract` inside a `torch.func` transform will raise a `RuntimeError`.
+- **Other `torch.func` transforms are not supported**: `apply_tesseract` works with PyTorch's standard autograd API (`.backward()`, `torch.autograd.grad`, `torch.autograd.forward_ad`), but **not** with `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.jacrev`, `torch.func.jacfwd`). These transforms create functionalized tensors that cannot be converted to NumPy arrays, which Tesseract endpoints require. Calling `apply_tesseract` inside a `torch.func` transform will raise a `RuntimeError`.
+
+- **No higher-order derivatives**: a gradient taken with `create_graph=True` can be used, but differentiating it again raises a `RuntimeError`, since the Tesseract's `vector_jacobian_product` is opaque to PyTorch. See [Troubleshooting](troubleshooting.md).
+
+- **`torch.vmap` needs a `vmap_method`**: pass `vmap_method="sequential"`, `"expand_dims"` or `"broadcast_all"` to `apply_tesseract` to batch it with `torch.vmap`; without one, `torch.vmap` raises when a batched tensor reaches `apply_tesseract`. See [Batching with `torch.vmap`](vmap-methods.md).

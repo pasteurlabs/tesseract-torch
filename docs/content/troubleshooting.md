@@ -10,13 +10,7 @@ RuntimeError: apply_tesseract does not support torch.func transforms (torch.func
   - Forward mode: torch.autograd.forward_ad (dual tensors)
 ```
 
-`torch.func.vmap` reports the same limitation in PyTorch's own words:
-
-```
-RuntimeError: You tried to vmap over _TesseractFunction, but it does not have vmap support. Please override and implement the vmap staticmethod or set generate_vmap_rule=True.
-```
-
-**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. `torch.func.vmap` is refused a step earlier, by PyTorch itself, because the underlying `autograd.Function` defines no batching rule.
+**Cause.** `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, and `torch.func.jacrev` / `torch.func.jacfwd`, which build on them) trace your function with functionalized tensors that have no backing storage. A Tesseract endpoint receives NumPy arrays, and such a tensor cannot be converted into one. Batched backward (`torch.autograd.functional.jacobian(..., vectorize=True)`, or `is_grads_batched=True` in `torch.autograd.grad`) hands the backward pass the same kind of tensor and raises the same error. `torch.vmap` is the exception; see the next entry.
 
 **Fix.** Use PyTorch's standard autograd API, which `apply_tesseract` supports in both modes:
 
@@ -34,6 +28,31 @@ with fwAD.dual_level():
     result = apply_tesseract(tess, inputs={"x": x_dual})
     _, jvp = fwAD.unpack_dual(result["y"])
 ```
+
+## `torch.vmap` without a `vmap_method`
+
+```
+NotImplementedError: torch.vmap over apply_tesseract needs a batching strategy. Pass vmap_method (one of ['sequential', 'expand_dims', 'broadcast_all']) to apply_tesseract.
+```
+
+**Cause.** A Tesseract call can be batched in more than one way, and which ones work depends on the Tesseract's schema, so `apply_tesseract` does not pick one for you.
+
+**Fix.** Pass `vmap_method` to the `apply_tesseract` call inside the batched function. `"sequential"` works with any schema; see [Batching with `torch.vmap`](vmap-methods.md) for the faster options. If the batched function also uses `torch.func.grad`, `torch.func.jacrev` or `torch.func.jacfwd`, see the previous entry: those transforms stay unsupported under `torch.vmap`.
+
+```python
+xs = torch.randn(8, 3)
+ys = torch.vmap(lambda x: apply_tesseract(tess, {"x": x}, vmap_method="sequential")["y"])(xs)
+```
+
+## Higher-order derivatives
+
+```
+RuntimeError: apply_tesseract does not support higher-order derivatives: a Tesseract's vector_jacobian_product cannot itself be differentiated. Gradients computed with create_graph=True can be used, but not differentiated again.
+```
+
+**Cause.** A gradient taken with `create_graph=True` was differentiated again, for example to get a Hessian-vector product or a gradient penalty. The Tesseract's share of that gradient comes from its `vector_jacobian_product` endpoint, which PyTorch cannot differentiate, so a second derivative would leave that share out.
+
+**Fix.** Differentiate through `apply_tesseract` only once. Where a second derivative is needed, the Tesseract has to compute it, for example by exposing the gradient as an output of its own.
 
 ## Reverse-mode AD against a Tesseract without `vector_jacobian_product`
 
@@ -80,4 +99,4 @@ RuntimeError: Error running Tesseract API jacobian_vector_product: Nested forwar
 
 **Cause.** `Tesseract.from_tesseract_api(...)` runs the Tesseract in your own Python process. If its `jacobian_vector_product` is itself implemented with `torch.func.jvp` (as the Tesseracts in `examples/` are), that call opens a second forward-AD level inside your `dual_level()` block, which PyTorch refuses.
 
-**Fix.** Serve the Tesseract in a container (`Tesseract.from_image(...)` followed by `.serve()`, or a `with` block), which is how the examples run it. Reverse-mode AD is unaffected either way.
+**Fix.** Run the Tesseract in its own process. `Tesseract.from_source("path/to/tesseract_api.py")` does that without Docker, and `python_executable=sys.executable` makes it reuse your current environment instead of building one from the Tesseract's requirements. A container (`Tesseract.from_image(...)`) works too and is how the examples run it. Both need `.serve()` or a `with` block before use. Reverse-mode AD is unaffected either way.

@@ -8,10 +8,8 @@ Covers reported issues and scenarios that early testers are likely to encounter.
 
 import numpy as np
 import pytest
-import tesseract_core
 import torch
 import torch.autograd.forward_ad as fwAD
-from packaging.version import Version
 
 from tesseract_torch import apply_tesseract
 
@@ -101,6 +99,18 @@ class TestTorchFuncTransformsRejected:
             torch.func.grad(
                 lambda p: apply_tesseract(vectoradd_tess, {"a": p, "b": b})["c"].sum()
             )(params)
+
+    def test_batched_backward_raises(self, nonlinear_tess):
+        """Batched cotangents have no storage either, and get the same error."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+
+        with pytest.raises(RuntimeError, match=r"does not support torch\.func"):
+            torch.autograd.functional.jacobian(
+                lambda a_: apply_tesseract(nonlinear_tess, {"a": a_, "b": b})["y"],
+                a,
+                vectorize=True,
+            )
 
     def test_error_message_suggests_alternatives(self, vectoradd_tess):
         params = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
@@ -318,6 +328,23 @@ class TestInputTypeVariations:
         result["c"].sum().backward()
         assert torch.allclose(a.grad, torch.ones(3), atol=1e-4)
 
+    def test_negative_view_input(self, nonlinear_tess):
+        """A tensor with the negative bit set, as ``.imag`` of a conjugate is, works.
+
+        Neither NumPy nor a device transport can represent the lazy bit.
+        """
+        base = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        zeros = torch.zeros(3, dtype=torch.float64)
+        a = torch.complex(zeros, base).conj().imag
+        assert a.is_neg()
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        a_ref = -base.detach()
+        torch.testing.assert_close(y, a_ref**3 + b * a_ref)
+        y.sum().backward()
+        torch.testing.assert_close(base.grad, -(3 * a_ref**2 + b))
+
     def test_python_list_for_non_diff(self, vectoradd_tess):
         """Python lists for non-differentiable inputs work."""
         a = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
@@ -357,18 +384,32 @@ class TestAutogradGraphIntegrity:
         result["c"].sum().backward()
         assert torch.allclose(grad1, a.grad)
 
-    def test_higher_order_grad_not_supported(self, vectoradd_tess):
-        """Higher-order gradients via create_graph are not supported.
+    def test_higher_order_grad_not_supported(self, nonlinear_tess):
+        """Differentiating a gradient through a Tesseract raises.
 
-        The VJP/JVP calls are opaque to autograd, so the backward pass itself
-        is not differentiable. This is a known limitation.
+        The VJP call is opaque to autograd, so the backward pass itself is not
+        differentiable. With another term in the loss, a second derivative
+        must not silently leave out the Tesseract's share. The first-order
+        gradient taken with create_graph=True is still correct.
         """
-        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, requires_grad=True)
-        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-        result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
-        (grad_a,) = torch.autograd.grad(result["c"].sum(), a, create_graph=True)
-        with pytest.raises(RuntimeError, match="does not require grad"):
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        loss = y.sum() + (a**3).sum()
+        (grad_a,) = torch.autograd.grad(loss, a, create_graph=True)
+        torch.testing.assert_close(grad_a, 6 * a.detach() ** 2 + b)
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
             torch.autograd.grad(grad_a.sum(), a)
+
+    def test_higher_order_grad_wrt_cotangent_not_supported(self, nonlinear_tess):
+        """The gradient depends on the cotangent too, which must not be dropped either."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        v = torch.ones(3, dtype=torch.float64, requires_grad=True)
+        (grad_a,) = torch.autograd.grad(y, a, v, create_graph=True)
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
+            torch.autograd.grad(grad_a.sum(), v)
 
     def test_chained_tesseracts(self, vectoradd_tess):
         """Two chained apply_tesseract calls propagate gradients correctly."""
@@ -404,8 +445,8 @@ class TestCUDA:
         """CUDA tensors support backward pass, with the gradient on the same device.
 
         Regression test: the VJP result is decoded from the Tesseract's
-        response (always host memory here, since this call doesn't opt into a
-        device transport), but autograd requires the gradient returned for a CUDA
+        response (always host memory here, since this Tesseract uses no device
+        transport), but autograd requires the gradient returned for a CUDA
         input to itself be a CUDA tensor -- returning a CPU tensor raises
         "invalid gradient ... expected device cuda:0 but got cpu".
         """
@@ -490,22 +531,8 @@ class TestPartialForwardTangents:
         torch.testing.assert_close(tangent, expected * tangent_in)
 
 
-# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
-# which landed after 1.12.0. Drop this guard once the minimum version is past it.
-_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
-
-_needs_wide_keys = pytest.mark.skipif(
-    not _CORE_ACCEPTS_WIDE_KEYS,
-    reason=f"tesseract-core {tesseract_core.__version__} rejects these keys (needs > 1.12.0)",
-)
-
-
 class TestPathHelpers:
-    """The path helpers, which decide where a key ends, exercised directly.
-
-    These need no runtime, so they cover the dotted-key handling on every
-    tesseract-core version, including ones that reject such keys on the wire.
-    """
+    """The path helpers, which decide where a key ends, exercised directly."""
 
     def test_a_dotted_key_is_one_segment(self):
         from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
@@ -526,6 +553,14 @@ class TestPathHelpers:
         assert _wire_name(("x",), {"x"}) == "x"
         assert _wire_name(("nope",), {"params.{}"}) is None
 
+    def test_wire_name_escapes_braces_and_backslashes_in_the_key(self):
+        from tesseract_torch.function import _wire_name
+
+        assert _wire_name(("params", "a{b}"), {"params.{}"}) == r"params.{a\{b\}}"
+        assert _wire_name(("params", "a\\b"), {"params.{}"}) == r"params.{a\\b}"
+        # A key spelled like the wildcard is still a concrete key.
+        assert _wire_name(("params", "{}"), {"params.{}"}) == r"params.{\{\}}"
+
     @pytest.mark.parametrize(
         "path,value,known,expected",
         [
@@ -545,23 +580,17 @@ class TestPathHelpers:
         assert _should_recurse(path, value, known) is expected
 
 
-class TestDottedDictKeys:
-    """A dict key is free to contain a dot, and the key is where the path ends."""
+class TestSpecialCharDictKeys:
+    """Dict keys may contain path syntax (dots, braces, backslashes)."""
 
     @pytest.mark.parametrize(
         "key",
-        [
-            "plain",
-            pytest.param("a/b", marks=_needs_wide_keys),
-            pytest.param("a:b", marks=_needs_wide_keys),
-            pytest.param("layer.0.weight", marks=_needs_wide_keys),
-        ],
+        ["plain", "a/b", "a:b", "layer.0.weight", "a{b", "a}b", "{}", "a\\b"],
     )
-    def test_gradient_reaches_a_dotted_key(self, dict_key_tess, key):
-        """Joining segments and splitting again drops the dotted key.
+    def test_gradient_reaches_dict_key(self, dict_key_tess, key):
+        """Each value is a literal key in ``{"params": {key: x}}``, not a path.
 
-        It never gets a wire name, so its tensor is never registered for
-        autograd and backward reports that nothing requires grad.
+        Gradients must flow back to ``x`` whatever characters the key contains.
         """
         x = torch.ones(3, requires_grad=True)
         apply_tesseract(dict_key_tess, {"params": {key: x}})["result"].sum().backward()

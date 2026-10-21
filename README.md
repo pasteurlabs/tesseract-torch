@@ -23,7 +23,7 @@ x_tensor.grad  # gradients flow through the Tesseract
 ## Quick start
 
 > [!NOTE]
-> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.12+).
 
 > [!IMPORTANT]
 > For more detailed installation instructions, please refer to the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/introduction/installation.html).
@@ -68,13 +68,20 @@ x_tensor.grad  # gradients flow through the Tesseract
    ```
 
 > [!TIP]
+> To skip Docker, replace `Tesseract.from_image("vectoradd_torch")` with `Tesseract.from_source("tesseract-torch/examples/simple/vectoradd_torch/tesseract_api.py")`. This serves the Tesseract in a subprocess, building a virtual environment from its requirements on first use (which needs [`uv`](https://docs.astral.sh/uv/)).
+
+> [!TIP]
 > Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-torch/tree/main/examples) for more ways to use Tesseract-Torch.
 
 ## Sharp edges
 
 - **Required endpoints**: Using `apply_tesseract` with reverse-mode AD (`.backward()`, `torch.autograd.grad`) requires the Tesseract to define a [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) endpoint. Forward-mode AD (`torch.autograd.forward_ad`) requires [`jacobian_vector_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#jacobian-vector-product).
 
-- **`torch.func` transforms are not supported**: `apply_tesseract` works with PyTorch's standard autograd API (`.backward()`, `torch.autograd.grad`, `torch.autograd.forward_ad`), but **not** with `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.vmap`). These transforms create functionalized tensors that cannot be converted to NumPy arrays, which Tesseract endpoints require. Calling `apply_tesseract` inside a `torch.func` transform will raise a clear error.
+- **Other `torch.func` transforms are not supported**: `apply_tesseract` works with PyTorch's standard autograd API (`.backward()`, `torch.autograd.grad`, `torch.autograd.forward_ad`), but **not** with `torch.func` transforms (`torch.func.vjp`, `torch.func.jvp`, `torch.func.grad`, `torch.func.jacrev`, `torch.func.jacfwd`). These transforms create functionalized tensors that cannot be converted to NumPy arrays, which Tesseract endpoints require. Calling `apply_tesseract` inside a `torch.func` transform will raise a clear error.
+
+- **No higher-order derivatives**: a gradient taken with `create_graph=True` can be used, but differentiating it again raises a `RuntimeError`, since the Tesseract's `vector_jacobian_product` is opaque to PyTorch. See [Troubleshooting](https://docs.pasteurlabs.ai/projects/tesseract-torch/latest/content/troubleshooting.html).
+
+- **`torch.vmap` needs a `vmap_method`**: pass `vmap_method="sequential"`, `"expand_dims"` or `"broadcast_all"` to `apply_tesseract` to batch it with `torch.vmap`; without one, `torch.vmap` raises when a batched tensor reaches `apply_tesseract`. See [Batching with `torch.vmap`](https://docs.pasteurlabs.ai/projects/tesseract-torch/latest/content/vmap-methods.html).
 
 ## License
 
