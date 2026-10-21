@@ -137,3 +137,22 @@ def test_a_numeric_dict_key_is_not_a_list_position():
     flat = dict(_flatten_pytree(as_list, recurse_into={"xs.[]"}))
     assert set(flat) == {("xs", 0), ("xs", 1)}
     assert isinstance(_unflatten_pytree(flat)["xs"], list)
+
+
+def test_int_keyed_output_stays_a_dict(int_key_tess):
+    x = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    out = apply_tesseract(int_key_tess, {"x": x})
+    assert out["by_index"] == {0: 1.0, 1: 2.0}
+
+
+def test_int_keyed_inputs_stay_dicts(int_key_tess):
+    x = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
+    inputs = {
+        "x": x,
+        "weights": {0: 2.0, 1: 3.0},
+        "offsets": {0: np.array([1.0, 1.0]), 5: np.array([0.5, 0.5])},
+    }
+    out = apply_tesseract(int_key_tess, inputs)
+    np.testing.assert_allclose(out["y"].detach().numpy(), [7.5, 13.5])
+    out["y"].sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [6.0, 6.0])
