@@ -139,20 +139,20 @@ def test_a_numeric_dict_key_is_not_a_list_position():
     assert isinstance(_unflatten_pytree(flat)["xs"], list)
 
 
-def test_int_keyed_output_stays_a_dict(int_key_tess):
-    x = torch.tensor([1.0, 2.0], dtype=torch.float64)
-    out = apply_tesseract(int_key_tess, {"x": x})
-    assert out["by_index"] == {0: 1.0, 1: 2.0}
+@pytest.mark.parametrize("key", [0, 1.5, ("a", 1)], ids=["int", "float", "tuple"])
+def test_a_dict_with_non_str_keys_stays_whole(key):
+    """Only str keys become path segments, so no other key can pass for a list position."""
+    from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
+
+    tree = {"weights": {key: 2.0}}
+    flat = dict(_flatten_pytree(tree))
+    assert set(flat) == {("weights",)}
+    assert _unflatten_pytree(flat) == tree
 
 
-def test_int_keyed_inputs_stay_dicts(int_key_tess):
-    x = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
-    inputs = {
-        "x": x,
-        "weights": {0: 2.0, 1: 3.0},
-        "offsets": {0: np.array([1.0, 1.0]), 5: np.array([0.5, 0.5])},
+def test_an_int_keyed_leaf_is_not_relisted():
+    from tesseract_torch.function import _unflatten_pytree
+
+    assert _unflatten_pytree({("by_index",): {0: 1.0, 1: 2.0}}) == {
+        "by_index": {0: 1.0, 1: 2.0}
     }
-    out = apply_tesseract(int_key_tess, inputs)
-    np.testing.assert_allclose(out["y"].detach().numpy(), [7.5, 13.5])
-    out["y"].sum().backward()
-    np.testing.assert_allclose(x.grad.numpy(), [6.0, 6.0])

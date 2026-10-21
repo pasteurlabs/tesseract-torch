@@ -71,12 +71,6 @@ def dict_key_tess() -> Tesseract:
 
 
 @pytest.fixture(scope="module")
-def int_key_tess() -> Tesseract:
-    """Int-keyed dict fields on the input and output side."""
-    return Tesseract.from_tesseract_api(here / "int_key_tesseract" / "tesseract_api.py")
-
-
-@pytest.fixture(scope="module")
 def local_gpu_tesseract():
     """The GPU Tesseract, loaded in-process. Skips without a CUDA GPU."""
     import torch
