@@ -8,6 +8,7 @@ not, so one image covers both a server that can take part in cuda_ipc and one
 that cannot (standing in for a server on another host).
 """
 
+import contextlib
 from typing import Any
 
 import numpy as np
@@ -16,13 +17,12 @@ from tesseract_core.runtime import Array, Differentiable, Float32
 
 
 def _array_module() -> Any:
-    try:
+    # Any failure here means no usable GPU, whatever the reason
+    with contextlib.suppress(Exception):
         import cupy
 
         if cupy.cuda.runtime.getDeviceCount() > 0:
             return cupy
-    except Exception:  # noqa: BLE001 - no usable GPU, whatever the reason
-        return np
     return np
 
 

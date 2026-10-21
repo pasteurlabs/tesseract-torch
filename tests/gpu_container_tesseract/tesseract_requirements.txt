@@ -1,2 +1,3 @@
 # The [ctk] extra brings the CUDA toolkit wheels CuPy needs to compile kernels.
 cupy-cuda12x[ctk]
+numpy
