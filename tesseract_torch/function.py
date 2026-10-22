@@ -290,7 +290,7 @@ def _children(value: Any) -> list[tuple[str | int, Any]] | None:
     An array is a leaf however sequence-like it looks, since the schema means
     it as one value rather than a list of them.
     """
-    if isinstance(value, dict):
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
         return list(value.items())
     if isinstance(value, torch.Tensor | np.ndarray):
         return None
@@ -399,6 +399,10 @@ def _resolve_output_names(
     return resolved
 
 
+class _Node(dict):
+    pass
+
+
 def _unflatten_pytree(flat: dict[KeyType, Any]) -> dict[str, Any]:
     """Reconstruct a nested container from ``{path_parts: value}``.
 
@@ -407,18 +411,18 @@ def _unflatten_pytree(flat: dict[KeyType, Any]) -> dict[str, Any]:
     dict where it wants a list, and only a list position ever arrives as an int,
     so this cannot mistake a dict key that looks like a number for one.
     """
-    tree: dict[str | int, Any] = {}
+    tree: dict[str | int, Any] = _Node()
     for parts, value in flat.items():
         node = tree
         for part in parts[:-1]:
-            node = node.setdefault(part, {})
+            node = node.setdefault(part, _Node())
         node[parts[-1]] = value
     return _relist(tree)
 
 
 def _relist(node: Any) -> Any:
     """Turn every dict built from list positions back into a list."""
-    if not isinstance(node, dict):
+    if not isinstance(node, _Node):
         return node
     rebuilt = {key: _relist(value) for key, value in node.items()}
     if rebuilt and all(isinstance(key, int) for key in rebuilt):

@@ -137,3 +137,22 @@ def test_a_numeric_dict_key_is_not_a_list_position():
     flat = dict(_flatten_pytree(as_list, recurse_into={"xs.[]"}))
     assert set(flat) == {("xs", 0), ("xs", 1)}
     assert isinstance(_unflatten_pytree(flat)["xs"], list)
+
+
+@pytest.mark.parametrize("key", [0, 1.5, ("a", 1)], ids=["int", "float", "tuple"])
+def test_a_dict_with_non_str_keys_stays_whole(key):
+    """Only str keys become path segments, so no other key can pass for a list position."""
+    from tesseract_torch.function import _flatten_pytree, _unflatten_pytree
+
+    tree = {"weights": {key: 2.0}}
+    flat = dict(_flatten_pytree(tree))
+    assert set(flat) == {("weights",)}
+    assert _unflatten_pytree(flat) == tree
+
+
+def test_an_int_keyed_leaf_is_not_relisted():
+    from tesseract_torch.function import _unflatten_pytree
+
+    assert _unflatten_pytree({("by_index",): {0: 1.0, 1: 2.0}}) == {
+        "by_index": {0: 1.0, 1: 2.0}
+    }
