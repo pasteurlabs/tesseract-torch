@@ -1,3 +1,4 @@
+# The image computes with CuPy or NumPy. PyTorch would make it much larger.
 # The [ctk] extra brings the CUDA toolkit wheels CuPy needs to compile kernels.
 cupy-cuda12x[ctk]
 numpy

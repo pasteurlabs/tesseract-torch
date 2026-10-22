@@ -1,24 +1,63 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A GPU-resident Tesseract for exercising the cuda_ipc dispatch path.
+"""The Tesseract behind the GPU tests, computing with PyTorch, CuPy or NumPy.
 
-``apply`` computes on ``torch`` CUDA tensors so its outputs stay in GPU memory,
-which is what lets the runtime export them via CUDA IPC (no device->host copy).
-The core math is a simple elementwise ``c = (a * scale + b) * mask`` so parity
-against a NumPy reference is trivial to check.
+``TESSERACT_TORCH_TEST_ARRAY_MODULE`` selects the array module ``xp``. The GPU
+tests run against ``torch`` and against ``cupy``, which stands in for any other
+GPU framework and differs from PyTorch in how it adopts device inputs and
+allocates outputs. ``numpy`` (the default) is for a server that cannot see the
+GPU. On the GPU, inputs that arrive in host memory are copied to the device, or
+fail the call if ``TESSERACT_TORCH_TEST_REJECT_HOST_INPUTS`` is set.
 
-``mask`` is a *non-differentiable* array input (contrast ``a`` / ``b``, which
-are ``Differentiable``). It defaults to all-ones so callers that omit it get
-the plain ``a * scale + b``, but when supplied it exercises the derivative
-code's handling of a non-differentiable, non-static array input.
+The math is ``c = (a * scale + b) * mask``. The non-differentiable input
+``mask`` (default all-ones) and output ``c_sum`` exercise the placeholder paths
+for non-differentiable fields.
 """
 
+import os
 from typing import Any
 
 import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
+
+_ARRAY_MODULE = os.environ.get("TESSERACT_TORCH_TEST_ARRAY_MODULE", "numpy")
+_REJECT_HOST_INPUTS = bool(os.environ.get("TESSERACT_TORCH_TEST_REJECT_HOST_INPUTS"))
+
+if _ARRAY_MODULE == "numpy":
+    xp = np
+
+    def _adopt(x: Any) -> Any:
+        return np.asarray(x)
+
+elif _ARRAY_MODULE == "torch":
+    import torch as xp
+
+    def _adopt(x: Any) -> Any:
+        if isinstance(x, xp.Tensor):
+            return x.cuda()
+        if isinstance(x, np.ndarray):
+            return xp.tensor(x, device="cuda")
+        # A device array, such as a cuda_ipc input
+        return xp.from_dlpack(x)
+
+elif _ARRAY_MODULE == "cupy":
+    import cupy as xp
+
+    def _adopt(x: Any) -> Any:
+        # Takes device memory as it is and copies host arrays to the GPU
+        return xp.asarray(x)
+
+else:
+    raise ValueError(f"Unknown TESSERACT_TORCH_TEST_ARRAY_MODULE {_ARRAY_MODULE!r}")
+
+
+def _asxp(x: Any) -> Any:
+    """Adopt an input array with ``xp``, without copying a GPU-resident one."""
+    if _REJECT_HOST_INPUTS and xp is not np and isinstance(x, np.ndarray):
+        raise RuntimeError("Expected a GPU-resident input, got a NumPy array.")
+    return _adopt(x)
 
 
 class InputSchema(BaseModel):
@@ -38,34 +77,13 @@ class OutputSchema(BaseModel):
     )
 
 
-def _to_cuda(x):
-    import torch
-
-    # x may arrive as a numpy array (base64 inputs) or an IpcDeviceArray
-    # (cuda_ipc inputs, exposing __cuda_array_interface__/__dlpack__).
-    # from_dlpack keeps a cuda_ipc array on-device; as_tensor moves a numpy
-    # array onto the device.
-    if hasattr(x, "__dlpack__"):
-        return torch.utils.dlpack.from_dlpack(x).cuda()
-    return torch.as_tensor(np.asarray(x)).cuda()
-
-
-def _compute_c(inputs):
-    import torch
-
-    a = _to_cuda(inputs.a)
-    b = _to_cuda(inputs.b)
-    scale = float(inputs.scale)
-    c = a * scale + b  # stays on GPU
-    mask = _to_cuda(inputs.mask) if inputs.mask is not None else torch.ones_like(a)
-    return c * mask
+def _mask_for(inputs, a):
+    return _asxp(inputs.mask) if inputs.mask is not None else xp.ones_like(a)
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    c = _compute_c(inputs)
-    # c_sum is a non-differentiable output: it makes the derivative endpoints
-    # emit a placeholder for it, exercising the GPU-direct return path for a
-    # non-differentiable output slot.
+    a = _asxp(inputs.a)
+    c = (a * float(inputs.scale) + _asxp(inputs.b)) * _mask_for(inputs, a)
     return OutputSchema(c=c, c_sum=c.sum().reshape(1))
 
 
@@ -82,16 +100,13 @@ def jacobian_vector_product(
     jvp_outputs: set[str],
     tangent_vector: dict[str, Any],
 ):
-    import torch
-
-    scale = float(inputs.scale)
-    a = _to_cuda(inputs.a)
-    mask = _to_cuda(inputs.mask) if inputs.mask is not None else torch.ones_like(a)
-    out = torch.zeros_like(a)
+    a = _asxp(inputs.a)
+    mask = _mask_for(inputs, a)
+    out = xp.zeros_like(a)
     if "a" in tangent_vector:
-        out = out + _to_cuda(tangent_vector["a"]) * scale * mask
+        out = out + _asxp(tangent_vector["a"]) * float(inputs.scale) * mask
     if "b" in tangent_vector:
-        out = out + _to_cuda(tangent_vector["b"]) * mask
+        out = out + _asxp(tangent_vector["b"]) * mask
     return {"c": out}
 
 
@@ -101,15 +116,11 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ):
-    import torch
-
-    scale = float(inputs.scale)
-    a = _to_cuda(inputs.a)
-    mask = _to_cuda(inputs.mask) if inputs.mask is not None else torch.ones_like(a)
-    ct = _to_cuda(cotangent_vector["c"]) * mask
+    a = _asxp(inputs.a)
+    ct = _asxp(cotangent_vector["c"]) * _mask_for(inputs, a)
     out = {}
     if "a" in vjp_inputs:
-        out["a"] = ct * scale
+        out["a"] = ct * float(inputs.scale)
     if "b" in vjp_inputs:
         out["b"] = ct
     return out

@@ -86,6 +86,18 @@ To run the tests simply run `pytest` in the root of the project:
 $ pytest
 ```
 
+The tests marked `gpu` need a CUDA GPU, and the ones in `tests/test_gpu_container.py`
+also Docker with the NVIDIA container runtime. Some of them run against a Tesseract
+that computes with CuPy, so install CuPy for the CUDA major your PyTorch was
+built against, e.g. for CUDA 13:
+
+```console
+$ pip install "cupy-cuda13x[ctk]"
+```
+
+Without a GPU (or without CuPy, for the CuPy tests) they are skipped. Set
+`TESSERACT_TORCH_GPU_REQUIRED=1` to make them fail instead, as the GPU CI job does.
+
 ### GitHub workflow
 
 This project uses Git for version control and follows a GitHub workflow. To
