@@ -119,7 +119,6 @@ def test_tensor_to_numpy_or_cuda_cpu_tensor_returns_numpy_even_on_device():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_tensor_to_numpy_or_cuda_cuda_tensor_default_is_host_copy():
     """Without ``on_device=True``, a CUDA tensor still takes the host round-trip.
 
@@ -134,7 +133,6 @@ def test_tensor_to_numpy_or_cuda_cuda_tensor_default_is_host_copy():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_tensor_to_numpy_or_cuda_cuda_tensor_on_device_passes_through():
     t = torch.tensor([1.0, 2.0, 3.0], device="cuda")
     out = _tensor_to_numpy_or_cuda(t, on_device=True)
@@ -150,7 +148,6 @@ def test_tensor_to_numpy_or_cuda_resolves_conjugate_views():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_tensor_to_numpy_or_cuda_resolves_views_on_device():
     """A tensor exported by a device transport carries no negative or conjugate bit."""
     t = torch.tensor([1 + 2j, 3 - 4j], device="cuda").conj()
@@ -163,7 +160,6 @@ def test_tensor_to_numpy_or_cuda_resolves_views_on_device():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_tensor_to_numpy_or_cuda_casts_to_the_declared_dtype_on_device():
     """A device transport does not cast, so the tensor is sent in the schema's dtype."""
     t = torch.tensor([1.0, 2.0], dtype=torch.float32, device="cuda")
@@ -236,7 +232,6 @@ def test_with_gpu_transport_views_only_when_needed(vectoradd_api_path):
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestCudaTensorWithoutDeviceTransport:
     """Without a device transport, CUDA tensors still take the host round-trip."""
 
@@ -275,7 +270,6 @@ def test_nondiff_host_arrays_and_tensors_follow_the_data():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_nondiff_device_arrays_become_tensors_on_their_device():
     """A device array the transport delivered is adopted without a copy."""
     source = torch.arange(4.0, device="cuda")
