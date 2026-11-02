@@ -82,6 +82,9 @@ filterwarnings = [
     # torch emits this from its own forward-AD machinery (fwAD.make_dual);
     # the message varies ("is deprecated" / "is not supported in Python 3.14+")
     "ignore:`torch\\.jit\\.script`:FutureWarning",
+    # torch>=2.15 probes for an MPS device during backward and warns on
+    # macOS CI runners, whose virtual GPU lacks Metal 2.0 support
+    "ignore:Skipping device .* that does not support Metal:UserWarning",
 ]
 
 [tool.coverage.run]
