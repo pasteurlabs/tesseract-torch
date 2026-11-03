@@ -156,3 +156,11 @@ def test_an_int_keyed_leaf_is_not_relisted():
     assert _unflatten_pytree({("by_index",): {0: 1.0, 1: 2.0}}) == {
         "by_index": {0: 1.0, 1: 2.0}
     }
+
+
+def test_an_optional_output_left_none_is_not_differentiated():
+    """An optional differentiable output that apply returns as None has no tangent."""
+    from tesseract_torch.function import _resolve_output_names
+
+    flat = {("y",): torch.ones(3), ("aux",): None}
+    assert _resolve_output_names(flat, ["y", "aux"]) == [(("y",), "y")]

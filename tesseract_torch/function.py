@@ -394,7 +394,7 @@ def _resolve_output_names(
     resolved: list[tuple[KeyType, str]] = []
     for concrete in sorted(flat_result):
         wire = _wire_name(concrete, set(templates))
-        if wire is not None:
+        if wire is not None and flat_result[concrete] is not None:
             resolved.append((concrete, wire))
     return resolved
 
