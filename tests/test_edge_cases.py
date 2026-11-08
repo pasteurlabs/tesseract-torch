@@ -145,6 +145,25 @@ class TestDtypes:
         result["c"].sum().backward()
         assert torch.allclose(a.grad, torch.ones(3, dtype=torch.float64), atol=1e-6)
 
+    def test_bfloat16_input(self, vectoradd_tess):
+        """NumPy has no bfloat16, so it is sent as the declared Float32."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16, requires_grad=True)
+        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
+        result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
+        assert torch.equal(result["c"], torch.tensor([5.0, 7.0, 9.0]))
+        result["c"].sum().backward()
+        assert torch.equal(a.grad, torch.ones(3, dtype=torch.bfloat16))
+
+    def test_bfloat16_tangent(self, vectoradd_tess):
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)
+        tangent = torch.tensor([1.0, 0.0, 2.0], dtype=torch.bfloat16)
+        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
+        with fwAD.dual_level():
+            dual = fwAD.make_dual(a, tangent)
+            result = apply_tesseract(vectoradd_tess, {"a": dual, "b": b})
+            jvp = fwAD.unpack_dual(result["c"]).tangent
+        assert torch.equal(jvp, torch.tensor([1.0, 0.0, 2.0]))
+
 
 # ---------------------------------------------------------------------------
 # Gradient accumulation and multiple backward passes
