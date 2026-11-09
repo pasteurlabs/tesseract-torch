@@ -117,6 +117,10 @@ _TENSOR_DTYPES = frozenset(
 )
 
 
+# The tensor dtypes among them, which ``Tensor.numpy()`` accepts.
+_NUMPY_TENSOR_DTYPES = frozenset(getattr(torch, dtype.name) for dtype in _TENSOR_DTYPES)
+
+
 def _tensor_can_hold(value: Any) -> bool:
     """Whether ``value`` is a NumPy array or scalar that converts to a tensor."""
     return (
@@ -197,12 +201,15 @@ def _tensor_to_numpy_or_cuda(
     a device transport represents them. With ``on_device``, a CUDA tensor is
     passed on to be sent by reference. It is made contiguous and cast to
     ``dtype``, as the transport sends a flat byte range that is not cast on
-    decode. Any other tensor is copied to the host.
+    decode. Any other tensor is copied to the host, and cast to ``dtype``
+    first when NumPy has no equivalent of its own dtype, such as bfloat16.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
     if on_device and t.is_cuda:
         return (t if dtype is None else t.to(dtype)).contiguous()
+    if dtype is not None and t.dtype not in _NUMPY_TENSOR_DTYPES:
+        t = t.to(dtype)
     return t.cpu().numpy()
 
 
