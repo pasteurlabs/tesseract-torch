@@ -110,6 +110,14 @@ def test_tensor_to_numpy_or_cuda_cpu_tensor_returns_numpy():
     np.testing.assert_allclose(out, [1.0, 2.0, 3.0])
 
 
+@pytest.mark.filterwarnings("ignore:ComplexHalf support is experimental")
+def test_tensor_to_numpy_or_cuda_complex32_without_dtype_keeps_imaginary_part():
+    t = torch.tensor([1 + 2j, 3 - 4j]).to(torch.chalf)
+    out = _tensor_to_numpy_or_cuda(t)
+    assert out.dtype == np.complex64
+    np.testing.assert_array_equal(out, [1 + 2j, 3 - 4j])
+
+
 def test_tensor_to_numpy_or_cuda_cpu_tensor_returns_numpy_even_on_device():
     """``on_device=True`` only changes behavior for CUDA tensors."""
     t = torch.tensor([1.0, 2.0, 3.0])

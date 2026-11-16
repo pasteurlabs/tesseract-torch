@@ -164,6 +164,15 @@ class TestDtypes:
             jvp = fwAD.unpack_dual(result["c"]).tangent
         assert torch.equal(jvp, torch.tensor([1.0, 0.0, 2.0]))
 
+    def test_bfloat16_nondifferentiable_input(self, vectoradd_tess):
+        """With no declared dtype to cast to, bfloat16 is sent as float32."""
+        a = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.bfloat16)
+        result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
+        assert torch.equal(result["c"], torch.tensor([5.0, 7.0, 9.0]))
+        result["c"].sum().backward()
+        assert torch.equal(a.grad, torch.ones(3))
+
 
 # ---------------------------------------------------------------------------
 # Gradient accumulation and multiple backward passes

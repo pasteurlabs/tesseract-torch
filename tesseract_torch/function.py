@@ -203,9 +203,19 @@ def _tensor_to_numpy_or_cuda(
     ``dtype``, as the transport sends a flat byte range that is not cast on
     decode. Any other tensor is copied to the host, and cast to ``dtype``
     first when NumPy has no equivalent of its own dtype, such as bfloat16.
+
+    A tensor of such a dtype with no ``dtype`` given, as on a
+    non-differentiable field, is cast to float32 (complex64 if complex), which
+    holds every value exactly, since neither path can send it as it is.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
+    if (
+        dtype is None
+        and t.dtype not in _NUMPY_TENSOR_DTYPES
+        and (t.is_floating_point() or t.is_complex())
+    ):
+        dtype = torch.complex64 if t.is_complex() else torch.float32
     if on_device and t.is_cuda:
         return (t if dtype is None else t.to(dtype)).contiguous()
     if dtype is not None and t.dtype not in _NUMPY_TENSOR_DTYPES:
