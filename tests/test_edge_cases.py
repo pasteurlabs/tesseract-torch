@@ -164,6 +164,58 @@ class TestDtypes:
             jvp = fwAD.unpack_dual(result["c"]).tangent
         assert torch.equal(jvp, torch.tensor([1.0, 0.0, 2.0]))
 
+    @pytest.mark.skipif(
+        not torch.backends.mps.is_available(), reason="no MPS device available"
+    )
+    def test_float64_gradient_reaches_an_mps_input(self, nonlinear_tess):
+        """MPS has no float64, so a Float64 VJP is cast before it is moved there."""
+        a = torch.tensor([1.0, 2.0, 3.0], device="mps", requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], device="mps")
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        y.sum().backward()
+        assert a.grad.device.type == "mps"
+        assert a.grad.dtype == torch.float32
+        expected = 3 * a.detach().cpu() ** 2 + b.cpu()
+        torch.testing.assert_close(a.grad.cpu(), expected)
+
+    def test_complex_gradient_for_a_real_input_is_rejected(
+        self, nonlinear_tess, monkeypatch
+    ):
+        """Casting it to the input's dtype would silently drop the imaginary part."""
+        vjp = nonlinear_tess.vector_jacobian_product
+        monkeypatch.setattr(
+            nonlinear_tess,
+            "vector_jacobian_product",
+            lambda *args, **kwargs: {
+                key: np.asarray(value) * (1 + 1j)
+                for key, value in vjp(*args, **kwargs).items()
+            },
+        )
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        with pytest.raises(RuntimeError, match="complex"):
+            y.sum().backward()
+
+    def test_shared_gradient_is_summed_in_the_vjp_dtype(self, batched_tess):
+        """A float32 input shared across the batch gets the float64 sum, rounded once."""
+        gen = torch.Generator().manual_seed(0)
+        a = torch.randn(1000, 3, generator=gen)
+        b = torch.randn(3, generator=gen)
+        c = np.zeros(3)
+        grads = []
+        for dtype in (torch.float32, torch.float64):
+            shared = b.to(dtype).clone().requires_grad_()
+            torch.vmap(
+                lambda x, shared=shared: apply_tesseract(
+                    batched_tess,
+                    {"a": x, "b": shared, "c": c},
+                    vmap_method="expand_dims",
+                )["y"]
+            )(a.to(dtype)).sum().backward()
+            grads.append(shared.grad)
+        assert torch.equal(grads[0], grads[1].float())
+
 
 # ---------------------------------------------------------------------------
 # Gradient accumulation and multiple backward passes
