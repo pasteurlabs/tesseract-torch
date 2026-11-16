@@ -74,23 +74,6 @@ NotImplementedError: Jacobian Vector Product (JVP) not implemented for this Tess
 
 **Fix.** Implement `jacobian_vector_product` in the Tesseract, or pass plain (non-dual) tensors.
 
-## List-valued differentiable fields
-
-```
-NotImplementedError: List-valued differentiable inputs are not supported yet: xs.[]. Use a dict-valued field, or keep the list entries as separate schema fields.
-```
-
-**Cause.** Tesseract-Torch walks nested dictionaries and sub-models to find differentiable leaves, but a `list[Differentiable[...]]` field arrives as a single opaque value, so its tensors cannot be registered with autograd. The same applies to list-valued differentiable outputs.
-
-**Fix.** Change the schema to a dict-valued field, or to one field per entry:
-
-```python
-class InputSchema(BaseModel):
-    xs: dict[str, Differentiable[Array[(3,), Float32]]]
-```
-
-and call it with `{"xs": {"first": x0, "second": x1}}`.
-
 ## Forward-mode AD with an in-process PyTorch Tesseract
 
 ```
