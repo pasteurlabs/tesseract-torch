@@ -173,6 +173,58 @@ class TestDtypes:
         result["c"].sum().backward()
         assert torch.equal(a.grad, torch.ones(3))
 
+    @pytest.mark.skipif(
+        not torch.backends.mps.is_available(), reason="no MPS device available"
+    )
+    def test_float64_gradient_reaches_an_mps_input(self, nonlinear_tess):
+        """MPS has no float64, so a Float64 VJP is cast before it is moved there."""
+        a = torch.tensor([1.0, 2.0, 3.0], device="mps", requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], device="mps")
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        y.sum().backward()
+        assert a.grad.device.type == "mps"
+        assert a.grad.dtype == torch.float32
+        expected = 3 * a.detach().cpu() ** 2 + b.cpu()
+        torch.testing.assert_close(a.grad.cpu(), expected)
+
+    def test_complex_gradient_for_a_real_input_is_rejected(
+        self, nonlinear_tess, monkeypatch
+    ):
+        """Casting it to the input's dtype would silently drop the imaginary part."""
+        vjp = nonlinear_tess.vector_jacobian_product
+        monkeypatch.setattr(
+            nonlinear_tess,
+            "vector_jacobian_product",
+            lambda *args, **kwargs: {
+                key: np.asarray(value) * (1 + 1j)
+                for key, value in vjp(*args, **kwargs).items()
+            },
+        )
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        y = apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"]
+        with pytest.raises(RuntimeError, match="complex"):
+            y.sum().backward()
+
+    def test_shared_gradient_is_summed_in_the_vjp_dtype(self, batched_tess):
+        """A float32 input shared across the batch gets the float64 sum, rounded once."""
+        gen = torch.Generator().manual_seed(0)
+        a = torch.randn(1000, 3, generator=gen)
+        b = torch.randn(3, generator=gen)
+        c = np.zeros(3)
+        grads = []
+        for dtype in (torch.float32, torch.float64):
+            shared = b.to(dtype).clone().requires_grad_()
+            torch.vmap(
+                lambda x, shared=shared: apply_tesseract(
+                    batched_tess,
+                    {"a": x, "b": shared, "c": c},
+                    vmap_method="expand_dims",
+                )["y"]
+            )(a.to(dtype)).sum().backward()
+            grads.append(shared.grad)
+        assert torch.equal(grads[0], grads[1].float())
+
 
 # ---------------------------------------------------------------------------
 # Gradient accumulation and multiple backward passes
@@ -438,6 +490,34 @@ class TestAutogradGraphIntegrity:
         (grad_a,) = torch.autograd.grad(y, a, v, create_graph=True)
         with pytest.raises(RuntimeError, match="does not support higher-order"):
             torch.autograd.grad(grad_a.sum(), v)
+
+    def test_reverse_over_forward_not_supported(self, nonlinear_tess):
+        """Differentiating a forward-mode tangent raises, like a gradient does.
+
+        The JVP call is opaque to autograd too, so with another term in the
+        loss a derivative of the tangent must not silently leave out the
+        Tesseract's share. The tangent itself is still correct.
+        """
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        with fwAD.dual_level():
+            dual_a = fwAD.make_dual(a, torch.ones(3, dtype=torch.float64))
+            y = apply_tesseract(nonlinear_tess, {"a": dual_a, "b": b})["y"]
+            tangent = fwAD.unpack_dual(y).tangent
+        torch.testing.assert_close(tangent, 3 * a.detach() ** 2 + b)
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
+            torch.autograd.grad(tangent.sum() + (a**2).sum(), a)
+
+    def test_reverse_over_forward_wrt_tangent_not_supported(self, nonlinear_tess):
+        """The output tangent depends on the input tangent, even an all-zero one."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        v = torch.zeros(3, dtype=torch.float64, requires_grad=True)
+        with fwAD.dual_level():
+            y = apply_tesseract(nonlinear_tess, {"a": fwAD.make_dual(a, v), "b": b})
+            tangent = fwAD.unpack_dual(y["y"]).tangent
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
+            torch.autograd.grad(tangent.sum() + (v**2).sum(), v)
 
     def test_chained_tesseracts(self, vectoradd_tess):
         """Two chained apply_tesseract calls propagate gradients correctly."""

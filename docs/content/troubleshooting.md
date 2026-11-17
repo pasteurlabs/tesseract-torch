@@ -47,10 +47,10 @@ ys = torch.vmap(lambda x: apply_tesseract(tess, {"x": x}, vmap_method="sequentia
 ## Higher-order derivatives
 
 ```
-RuntimeError: apply_tesseract does not support higher-order derivatives: a Tesseract's vector_jacobian_product cannot itself be differentiated. Gradients computed with create_graph=True can be used, but not differentiated again.
+RuntimeError: apply_tesseract does not support higher-order derivatives: a Tesseract's vector_jacobian_product and jacobian_vector_product cannot themselves be differentiated. Gradients computed with create_graph=True and tangents computed in forward mode cannot be differentiated again.
 ```
 
-**Cause.** A gradient taken with `create_graph=True` was differentiated again, for example to get a Hessian-vector product or a gradient penalty. The Tesseract's share of that gradient comes from its `vector_jacobian_product` endpoint, which PyTorch cannot differentiate, so a second derivative would leave that share out.
+**Cause.** A gradient taken with `create_graph=True` was differentiated again, for example to get a Hessian-vector product or a gradient penalty. The Tesseract's share of that gradient comes from its `vector_jacobian_product` endpoint, which PyTorch cannot differentiate, so a second derivative would leave that share out. The same holds for a tangent computed in forward mode (`torch.autograd.forward_ad`) and then differentiated in reverse mode, whose share comes from `jacobian_vector_product`.
 
 **Fix.** Differentiate through `apply_tesseract` only once. Where a second derivative is needed, the Tesseract has to compute it, for example by exposing the gradient as an output of its own.
 
@@ -73,23 +73,6 @@ NotImplementedError: Jacobian Vector Product (JVP) not implemented for this Tess
 **Cause.** The forward-mode counterpart of the previous entry: a call inside `torch.autograd.forward_ad.dual_level()` with dual tensors as inputs is dispatched to the Tesseract's [`jacobian_vector_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#jacobian-vector-product) endpoint, which this Tesseract does not define.
 
 **Fix.** Implement `jacobian_vector_product` in the Tesseract, or pass plain (non-dual) tensors.
-
-## List-valued differentiable fields
-
-```
-NotImplementedError: List-valued differentiable inputs are not supported yet: xs.[]. Use a dict-valued field, or keep the list entries as separate schema fields.
-```
-
-**Cause.** Tesseract-Torch walks nested dictionaries and sub-models to find differentiable leaves, but a `list[Differentiable[...]]` field arrives as a single opaque value, so its tensors cannot be registered with autograd. The same applies to list-valued differentiable outputs.
-
-**Fix.** Change the schema to a dict-valued field, or to one field per entry:
-
-```python
-class InputSchema(BaseModel):
-    xs: dict[str, Differentiable[Array[(3,), Float32]]]
-```
-
-and call it with `{"xs": {"first": x0, "second": x1}}`.
 
 ## Forward-mode AD with an in-process PyTorch Tesseract
 
