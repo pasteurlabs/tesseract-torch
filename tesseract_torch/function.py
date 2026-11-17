@@ -210,15 +210,17 @@ def _tensor_to_numpy_or_cuda(
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
-    wide = None
+    stand_in_dtype = None
     if t.dtype not in _NUMPY_TENSOR_DTYPES and (
         t.is_floating_point() or t.is_complex()
     ):
-        wide = torch.complex64 if t.is_complex() else torch.float32
+        stand_in_dtype = torch.complex64 if t.is_complex() else torch.float32
     if on_device and t.is_cuda:
-        target = wide if dtype is None else dtype
+        target = stand_in_dtype if dtype is None else dtype
         return (t if target is None else t.to(target)).contiguous()
-    return (t if wide is None else t.to(wide)).cpu().numpy()
+    if stand_in_dtype is not None:
+        t = t.to(stand_in_dtype)
+    return t.cpu().numpy()
 
 
 def _get_differentiable_arrays(
