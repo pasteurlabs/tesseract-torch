@@ -817,8 +817,8 @@ class _NotDifferentiableTwice(torch.autograd.Function):
             "apply_tesseract does not support higher-order derivatives: a "
             "Tesseract's vector_jacobian_product and jacobian_vector_product "
             "cannot themselves be differentiated. Gradients computed with "
-            "create_graph=True and tangents computed in forward mode have the "
-            "right values, but cannot be differentiated again."
+            "create_graph=True and tangents computed in forward mode cannot be "
+            "differentiated again."
         )
 
 
