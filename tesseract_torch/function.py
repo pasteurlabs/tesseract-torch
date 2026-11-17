@@ -192,6 +192,13 @@ def _require_storage(t: torch.Tensor) -> None:
         ) from None
 
 
+def _broadcasts_to(shape: torch.Size, target: torch.Size) -> bool:
+    """Whether an array of shape ``shape`` broadcasts to ``target``."""
+    return len(shape) <= len(target) and all(
+        n in (1, m) for n, m in zip(reversed(shape), reversed(target), strict=False)
+    )
+
+
 def _tensor_to_numpy_or_cuda(
     t: torch.Tensor, *, on_device: bool = False, dtype: torch.dtype | None = None
 ) -> Any:
@@ -645,7 +652,17 @@ class _TesseractFunction(torch.autograd.Function):
         ):
             g = vjp_result.get(wire)
             if g is not None:
-                grad_inputs.append(_to_tensor(g).to(tensor.device))
+                g = _to_tensor(g)
+                # Autograd would sum a broadcast gradient to the input's shape
+                # and then cast it to the input's dtype. Both are done here, in
+                # that order, before the move, since the device may not hold
+                # the VJP's dtype (MPS has no float64). A gradient autograd
+                # rejects is left as it is.
+                if g.shape != tensor.shape and _broadcasts_to(tensor.shape, g.shape):
+                    g = g.sum_to_size(tensor.shape)
+                if g.is_floating_point() or g.is_complex() == tensor.is_complex():
+                    g = g.to(tensor.dtype)
+                grad_inputs.append(g.to(tensor.device))
             elif needed:
                 grad_inputs.append(torch.zeros_like(tensor))
             else:
