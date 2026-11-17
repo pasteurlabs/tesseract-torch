@@ -482,6 +482,34 @@ class TestAutogradGraphIntegrity:
         with pytest.raises(RuntimeError, match="does not support higher-order"):
             torch.autograd.grad(grad_a.sum(), v)
 
+    def test_reverse_over_forward_not_supported(self, nonlinear_tess):
+        """Differentiating a forward-mode tangent raises, like a gradient does.
+
+        The JVP call is opaque to autograd too, so with another term in the
+        loss a derivative of the tangent must not silently leave out the
+        Tesseract's share. The tangent itself is still correct.
+        """
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        with fwAD.dual_level():
+            dual_a = fwAD.make_dual(a, torch.ones(3, dtype=torch.float64))
+            y = apply_tesseract(nonlinear_tess, {"a": dual_a, "b": b})["y"]
+            tangent = fwAD.unpack_dual(y).tangent
+        torch.testing.assert_close(tangent, 3 * a.detach() ** 2 + b)
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
+            torch.autograd.grad(tangent.sum() + (a**2).sum(), a)
+
+    def test_reverse_over_forward_wrt_tangent_not_supported(self, nonlinear_tess):
+        """The output tangent depends on the input tangent, even an all-zero one."""
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        b = torch.tensor([0.5, -1.0, 2.0], dtype=torch.float64)
+        v = torch.zeros(3, dtype=torch.float64, requires_grad=True)
+        with fwAD.dual_level():
+            y = apply_tesseract(nonlinear_tess, {"a": fwAD.make_dual(a, v), "b": b})
+            tangent = fwAD.unpack_dual(y["y"]).tangent
+        with pytest.raises(RuntimeError, match="does not support higher-order"):
+            torch.autograd.grad(tangent.sum() + (v**2).sum(), v)
+
     def test_chained_tesseracts(self, vectoradd_tess):
         """Two chained apply_tesseract calls propagate gradients correctly."""
         a = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
