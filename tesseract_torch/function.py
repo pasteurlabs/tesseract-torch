@@ -210,10 +210,13 @@ def _tensor_to_numpy_or_cuda(
     ``dtype``, as the transport sends a flat byte range that is not cast on
     decode. Any other tensor is copied to the host.
 
-    A tensor of a dtype NumPy lacks (bfloat16, float8, complex32) goes as
-    float32 (complex64 if complex), which holds every value exactly: always on
-    the host, where the Tesseract casts it to the field's dtype and checks that
-    the values fit, and on the device when no ``dtype`` is given.
+    A floating or complex tensor of a dtype NumPy lacks (bfloat16, float8,
+    complex32) goes as float32 (complex64 if complex), which holds every value
+    exactly: always on the host, where the Tesseract casts it to the field's
+    dtype and checks that the values fit, and on the device when no ``dtype``
+    is given. The other dtypes NumPy lacks (quantized, bit and sub-byte int),
+    and the packed float4_e2m1fn_x2, cannot be cast to one it has, so
+    converting them raises on the host.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
