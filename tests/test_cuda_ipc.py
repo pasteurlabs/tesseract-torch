@@ -111,11 +111,21 @@ def test_tensor_to_numpy_or_cuda_cpu_tensor_returns_numpy():
 
 
 @pytest.mark.filterwarnings("ignore:ComplexHalf support is experimental")
-def test_tensor_to_numpy_or_cuda_complex32_without_dtype_keeps_imaginary_part():
+@pytest.mark.parametrize("dtype", [None, torch.float32], ids=["no_dtype", "float32"])
+def test_tensor_to_numpy_or_cuda_complex32_keeps_imaginary_part(dtype):
+    """Also for a real field, which the Tesseract's cast then rejects."""
     t = torch.tensor([1 + 2j, 3 - 4j]).to(torch.chalf)
-    out = _tensor_to_numpy_or_cuda(t)
+    out = _tensor_to_numpy_or_cuda(t, dtype=dtype)
     assert out.dtype == np.complex64
     np.testing.assert_array_equal(out, [1 + 2j, 3 - 4j])
+
+
+def test_tensor_to_numpy_or_cuda_bfloat16_goes_as_float32_on_host():
+    """Not as a Float16 field's dtype, so the Tesseract's cast checks the range."""
+    t = torch.tensor([1.0, 1e5], dtype=torch.bfloat16)
+    out = _tensor_to_numpy_or_cuda(t, dtype=torch.float16)
+    assert out.dtype == np.float32
+    np.testing.assert_array_equal(out, t.float().numpy())
 
 
 def test_tensor_to_numpy_or_cuda_cpu_tensor_returns_numpy_even_on_device():
@@ -173,6 +183,17 @@ def test_tensor_to_numpy_or_cuda_casts_to_the_declared_dtype_on_device():
     t = torch.tensor([1.0, 2.0], dtype=torch.float32, device="cuda")
     out = _tensor_to_numpy_or_cuda(t, on_device=True, dtype=torch.float64)
     assert out.dtype == torch.float64 and out.is_cuda
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    ("dtype", "expected"), [(torch.float64, torch.float64), (None, torch.float32)]
+)
+def test_tensor_to_numpy_or_cuda_bfloat16_on_device(dtype, expected):
+    """The declared dtype if there is one, else float32, which holds every value."""
+    t = torch.tensor([1.0, 2.0], dtype=torch.bfloat16, device="cuda")
+    out = _tensor_to_numpy_or_cuda(t, on_device=True, dtype=dtype)
+    assert out.dtype == expected and out.is_cuda
 
 
 def test_tensor_to_numpy_or_cuda_rejects_functional_tensors():

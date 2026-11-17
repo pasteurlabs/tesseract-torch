@@ -146,7 +146,7 @@ class TestDtypes:
         assert torch.allclose(a.grad, torch.ones(3, dtype=torch.float64), atol=1e-6)
 
     def test_bfloat16_input(self, vectoradd_tess):
-        """NumPy has no bfloat16, so it is sent as the declared Float32."""
+        """NumPy has no bfloat16, so it is sent as float32."""
         a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16, requires_grad=True)
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
@@ -165,7 +165,7 @@ class TestDtypes:
         assert torch.equal(jvp, torch.tensor([1.0, 0.0, 2.0]))
 
     def test_bfloat16_nondifferentiable_input(self, vectoradd_tess):
-        """With no declared dtype to cast to, bfloat16 is sent as float32."""
+        """Also on a field whose dtype tesseract-torch does not read."""
         a = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
         b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.bfloat16)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})

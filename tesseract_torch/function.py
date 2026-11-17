@@ -201,26 +201,24 @@ def _tensor_to_numpy_or_cuda(
     a device transport represents them. With ``on_device``, a CUDA tensor is
     passed on to be sent by reference. It is made contiguous and cast to
     ``dtype``, as the transport sends a flat byte range that is not cast on
-    decode. Any other tensor is copied to the host, and cast to ``dtype``
-    first when NumPy has no equivalent of its own dtype, such as bfloat16.
+    decode. Any other tensor is copied to the host.
 
-    A tensor of such a dtype with no ``dtype`` given, as on a
-    non-differentiable field, is cast to float32 (complex64 if complex), which
-    holds every value exactly, since neither path can send it as it is.
+    A tensor of a dtype NumPy lacks (bfloat16, float8, complex32) goes as
+    float32 (complex64 if complex), which holds every value exactly: always on
+    the host, where the Tesseract casts it to the field's dtype and checks that
+    the values fit, and on the device when no ``dtype`` is given.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
-    if (
-        dtype is None
-        and t.dtype not in _NUMPY_TENSOR_DTYPES
-        and (t.is_floating_point() or t.is_complex())
+    wide = None
+    if t.dtype not in _NUMPY_TENSOR_DTYPES and (
+        t.is_floating_point() or t.is_complex()
     ):
-        dtype = torch.complex64 if t.is_complex() else torch.float32
+        wide = torch.complex64 if t.is_complex() else torch.float32
     if on_device and t.is_cuda:
-        return (t if dtype is None else t.to(dtype)).contiguous()
-    if dtype is not None and t.dtype not in _NUMPY_TENSOR_DTYPES:
-        t = t.to(dtype)
-    return t.cpu().numpy()
+        target = wide if dtype is None else dtype
+        return (t if target is None else t.to(target)).contiguous()
+    return (t if wide is None else t.to(wide)).cpu().numpy()
 
 
 def _get_differentiable_arrays(
