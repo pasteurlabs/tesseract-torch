@@ -697,26 +697,38 @@ class _TesseractFunction(torch.autograd.Function):
         # rejects None from jvp(), so return explicit zeros without calling
         # the Tesseract.
         if not jvp_inputs:
-            return tuple(
+            out_tangents = tuple(
                 torch.zeros(shape, dtype=dtype, device=device)
                 for shape, dtype, device in ctx.diff_output_specs
             )
-
-        jvp_result = _with_gpu_transport(
-            ctx.tesseract, ctx.gpu_transport
-        ).jacobian_vector_product(
-            inputs=_unflatten_pytree(_saved_inputs(ctx, ctx.saved_tensors)),
-            jvp_inputs=jvp_inputs,
-            jvp_outputs=list(ctx.diff_output_wires),
-            tangent_vector=tangent_vector,
-        )
-
-        return tuple(
-            _to_tensor(jvp_result[wire]).to(device)
-            for wire, (_, _, device) in zip(
-                ctx.diff_output_wires, ctx.diff_output_specs, strict=True
+        else:
+            jvp_result = _with_gpu_transport(
+                ctx.tesseract, ctx.gpu_transport
+            ).jacobian_vector_product(
+                inputs=_unflatten_pytree(_saved_inputs(ctx, ctx.saved_tensors)),
+                jvp_inputs=jvp_inputs,
+                jvp_outputs=list(ctx.diff_output_wires),
+                tangent_vector=tangent_vector,
             )
-        )
+            out_tangents = tuple(
+                _to_tensor(jvp_result[wire]).to(device)
+                for wire, (_, _, device) in zip(
+                    ctx.diff_output_wires, ctx.diff_output_specs, strict=True
+                )
+            )
+
+        # As in backward(): reverse mode would treat these tangents as
+        # constants and silently drop the Tesseract's share of their
+        # derivative, so differentiating them raises instead.
+        if torch.is_grad_enabled():
+            depends_on = [
+                *ctx.saved_tensors,
+                *(t for t in tensor_tangents if t is not None),
+            ]
+            out_tangents = tuple(
+                _NotDifferentiableTwice.apply(t, *depends_on) for t in out_tangents
+            )
+        return out_tangents
 
     @staticmethod
     def vmap(
@@ -788,9 +800,9 @@ class _TesseractFunction(torch.autograd.Function):
 
 
 class _NotDifferentiableTwice(torch.autograd.Function):
-    """Pass a gradient through, raising if anything differentiates it.
+    """Pass a gradient or tangent through, raising if anything differentiates it.
 
-    The extra inputs are only there to connect the gradient to the graph.
+    The extra inputs are only there to connect it to the graph.
     """
 
     @staticmethod
@@ -803,8 +815,9 @@ class _NotDifferentiableTwice(torch.autograd.Function):
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> None:
         raise RuntimeError(
             "apply_tesseract does not support higher-order derivatives: a "
-            "Tesseract's vector_jacobian_product cannot itself be differentiated. "
-            "Gradients computed with create_graph=True can be used, but not "
+            "Tesseract's vector_jacobian_product and jacobian_vector_product "
+            "cannot themselves be differentiated. Gradients computed with "
+            "create_graph=True and tangents computed in forward mode cannot be "
             "differentiated again."
         )
 
