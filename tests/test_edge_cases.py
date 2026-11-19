@@ -154,6 +154,18 @@ class TestDtypes:
         result["c"].sum().backward()
         assert torch.equal(a.grad, torch.ones(3, dtype=torch.bfloat16))
 
+    @pytest.mark.parametrize("name", ["uint4", "bits8", "float4_e2m1fn_x2"])
+    def test_dtype_without_a_numpy_stand_in_is_refused(self, vectoradd_tess, name):
+        """A dtype NumPy lacks and that has no stand-in raises a clear error."""
+        if not hasattr(torch, name):
+            pytest.skip(f"torch {torch.__version__} has no {name}")
+        a = torch.zeros(3, dtype=getattr(torch, name))
+        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
+        with pytest.raises(
+            TypeError, match=f"dtype torch.{name} has no NumPy equivalent"
+        ):
+            apply_tesseract(vectoradd_tess, {"a": a, "b": b})
+
     def test_bfloat16_tangent(self, vectoradd_tess):
         a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)
         tangent = torch.tensor([1.0, 0.0, 2.0], dtype=torch.bfloat16)

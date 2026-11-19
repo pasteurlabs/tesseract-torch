@@ -120,6 +120,9 @@ _TENSOR_DTYPES = frozenset(
 # The tensor dtypes among them, which ``Tensor.numpy()`` accepts.
 _NUMPY_TENSOR_DTYPES = frozenset(getattr(torch, dtype.name) for dtype in _TENSOR_DTYPES)
 
+# A floating dtype that packs two values per byte and does not cast; older torch lacks it.
+_FLOAT4_E2M1FN_X2 = getattr(torch, "float4_e2m1fn_x2", None)
+
 
 def _tensor_can_hold(value: Any) -> bool:
     """Whether ``value`` is a NumPy array or scalar that converts to a tensor."""
@@ -214,17 +217,23 @@ def _tensor_to_numpy_or_cuda(
     complex32) goes as float32 (complex64 if complex), which holds every value
     exactly: always on the host, where the Tesseract casts it to the field's
     dtype and checks that the values fit, and on the device when no ``dtype``
-    is given. The other dtypes NumPy lacks (quantized, bit and sub-byte int),
-    and the packed float4_e2m1fn_x2, cannot be cast to one it has, so
-    converting them raises on the host.
+    is given. The other dtypes NumPy lacks (quantized, bit and sub-byte int,
+    and the packed float4_e2m1fn_x2) cannot be cast to one it has, so they
+    raise a TypeError.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
     stand_in_dtype = None
-    if t.dtype not in _NUMPY_TENSOR_DTYPES and (
-        t.is_floating_point() or t.is_complex()
-    ):
-        stand_in_dtype = torch.complex64 if t.is_complex() else torch.float32
+    if t.dtype not in _NUMPY_TENSOR_DTYPES:
+        if t.is_complex():
+            stand_in_dtype = torch.complex64
+        elif t.is_floating_point() and t.dtype != _FLOAT4_E2M1FN_X2:
+            stand_in_dtype = torch.float32
+        else:
+            raise TypeError(
+                f"Tensor dtype {t.dtype} has no NumPy equivalent and cannot be "
+                "cast to one; convert the tensor to a supported dtype first."
+            )
     if on_device and t.is_cuda:
         target = stand_in_dtype if dtype is None else dtype
         return (t if target is None else t.to(target)).contiguous()
