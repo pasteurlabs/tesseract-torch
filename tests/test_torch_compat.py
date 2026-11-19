@@ -194,3 +194,29 @@ def test_forward_ad_raises_without_jvp_endpoint(forwardonly_tess):
     with pytest.raises(NotImplementedError, match="JVP"), fwAD.dual_level():
         a_dual = fwAD.make_dual(a, tangent)
         apply_tesseract(forwardonly_tess, {"a": a_dual})
+
+
+@pytest.mark.skipif(
+    not torch._dynamo.is_dynamo_supported(),
+    reason="torch.compile does not support this Python version",
+)
+# torch warns when Dynamo reads `.grad` of the non-leaf output on resuming after
+# the graph break; a disabled function returning a dict of tensors does the same.
+@pytest.mark.filterwarnings(
+    "ignore:The .grad attribute of a Tensor that is not a leaf:UserWarning"
+)
+def test_torch_compile_with_an_in_process_tesseract(nonlinear_tess):
+    """A compiled function gives eager's values and gradients (#102)."""
+
+    def f(a, b):
+        return apply_tesseract(nonlinear_tess, {"a": a, "b": b})["y"].sum()
+
+    results = []
+    for fn in (f, torch.compile(f, backend="eager")):
+        a = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([3.0, 4.0], dtype=torch.float64, requires_grad=True)
+        y = fn(a, b)
+        y.backward()
+        results.append((y.detach(), a.grad, b.grad))
+    for eager, compiled in zip(*results, strict=True):
+        assert torch.equal(eager, compiled)
