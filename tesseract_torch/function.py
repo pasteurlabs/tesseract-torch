@@ -999,6 +999,10 @@ def _expand_leaf(path: KeyType, value: Any, batch_size: int, vmap_method: str) -
 # ---------------------------------------------------------------------------
 
 
+# Dynamo cannot trace a Tesseract call. Tracing into tesseract-core's
+# validators instead makes an in-process call take a NumPy array for a CUDA
+# one, so the whole call is left to run eagerly.
+@torch.compiler.disable
 def apply_tesseract(
     tesseract: Tesseract,
     inputs: dict[str, Any],
@@ -1009,7 +1013,8 @@ def apply_tesseract(
 
     Infers which inputs/outputs are differentiable from the Tesseract's schema.
     Torch tensors provided for differentiable fields participate in autograd;
-    all other values are passed through as static inputs.
+    all other values are passed through as static inputs. Under
+    ``torch.compile`` the call is a graph break.
 
     Supports both reverse-mode (``.backward()``) and forward-mode
     (``torch.autograd.forward_ad``) differentiation.
