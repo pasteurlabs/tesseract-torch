@@ -120,7 +120,8 @@ _TENSOR_DTYPES = frozenset(
 # The tensor dtypes among them, which ``Tensor.numpy()`` accepts.
 _NUMPY_TENSOR_DTYPES = frozenset(getattr(torch, dtype.name) for dtype in _TENSOR_DTYPES)
 
-# A floating dtype that packs two values per byte and does not cast; older torch lacks it.
+# A floating dtype that packs two values per byte; ``Tensor.to()`` raises NotImplementedError
+# for it, so it gets no stand-in. Older torch lacks it.
 _FLOAT4_E2M1FN_X2 = getattr(torch, "float4_e2m1fn_x2", None)
 
 
@@ -232,7 +233,7 @@ def _tensor_to_numpy_or_cuda(
         else:
             raise TypeError(
                 f"Tensor dtype {t.dtype} has no NumPy equivalent and cannot be "
-                "cast to one; convert the tensor to a supported dtype first."
+                "cast to one. Convert the tensor to a supported dtype first."
             )
     if on_device and t.is_cuda:
         target = stand_in_dtype if dtype is None else dtype
