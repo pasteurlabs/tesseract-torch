@@ -120,6 +120,10 @@ _TENSOR_DTYPES = frozenset(
 # The tensor dtypes among them, which ``Tensor.numpy()`` accepts.
 _NUMPY_TENSOR_DTYPES = frozenset(getattr(torch, dtype.name) for dtype in _TENSOR_DTYPES)
 
+# A floating dtype that packs two values per byte; ``Tensor.to()`` raises NotImplementedError
+# for it, so it gets no stand-in. Older torch lacks it.
+_FLOAT4_E2M1FN_X2 = getattr(torch, "float4_e2m1fn_x2", None)
+
 
 def _tensor_can_hold(value: Any) -> bool:
     """Whether ``value`` is a NumPy array or scalar that converts to a tensor."""
@@ -208,15 +212,34 @@ def _tensor_to_numpy_or_cuda(
     a device transport represents them. With ``on_device``, a CUDA tensor is
     passed on to be sent by reference. It is made contiguous and cast to
     ``dtype``, as the transport sends a flat byte range that is not cast on
-    decode. Any other tensor is copied to the host, and cast to ``dtype``
-    first when NumPy has no equivalent of its own dtype, such as bfloat16.
+    decode. Any other tensor is copied to the host.
+
+    A floating or complex tensor of a dtype NumPy lacks (bfloat16, float8,
+    complex32) goes as float32 (complex64 if complex), which holds every value
+    exactly: always on the host, where the Tesseract casts it to the field's
+    dtype and checks that the values fit, and on the device when no ``dtype``
+    is given. The other dtypes NumPy lacks (quantized, bit and sub-byte int,
+    and the packed float4_e2m1fn_x2) cannot be cast to one it has, so they
+    raise a TypeError.
     """
     _require_storage(t)
     t = t.detach().resolve_conj().resolve_neg()
+    stand_in_dtype = None
+    if t.dtype not in _NUMPY_TENSOR_DTYPES:
+        if t.is_complex():
+            stand_in_dtype = torch.complex64
+        elif t.is_floating_point() and t.dtype != _FLOAT4_E2M1FN_X2:
+            stand_in_dtype = torch.float32
+        else:
+            raise TypeError(
+                f"Tensor dtype {t.dtype} has no NumPy equivalent and cannot be "
+                "cast to one. Convert the tensor to a supported dtype first."
+            )
     if on_device and t.is_cuda:
-        return (t if dtype is None else t.to(dtype)).contiguous()
-    if dtype is not None and t.dtype not in _NUMPY_TENSOR_DTYPES:
-        t = t.to(dtype)
+        target = stand_in_dtype if dtype is None else dtype
+        return (t if target is None else t.to(target)).contiguous()
+    if stand_in_dtype is not None:
+        t = t.to(stand_in_dtype)
     return t.cpu().numpy()
 
 

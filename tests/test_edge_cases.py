@@ -146,13 +146,25 @@ class TestDtypes:
         assert torch.allclose(a.grad, torch.ones(3, dtype=torch.float64), atol=1e-6)
 
     def test_bfloat16_input(self, vectoradd_tess):
-        """NumPy has no bfloat16, so it is sent as the declared Float32."""
+        """NumPy has no bfloat16, so it is sent as float32."""
         a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16, requires_grad=True)
         b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
         assert torch.equal(result["c"], torch.tensor([5.0, 7.0, 9.0]))
         result["c"].sum().backward()
         assert torch.equal(a.grad, torch.ones(3, dtype=torch.bfloat16))
+
+    @pytest.mark.parametrize("name", ["uint4", "bits8", "float4_e2m1fn_x2"])
+    def test_dtype_without_a_numpy_stand_in_is_refused(self, vectoradd_tess, name):
+        """A dtype NumPy lacks and that has no stand-in raises a clear error."""
+        if not hasattr(torch, name):
+            pytest.skip(f"torch {torch.__version__} has no {name}")
+        a = torch.zeros(3, dtype=getattr(torch, name))
+        b = np.array([4.0, 5.0, 6.0], dtype=np.float32)
+        with pytest.raises(
+            TypeError, match=f"dtype torch.{name} has no NumPy equivalent"
+        ):
+            apply_tesseract(vectoradd_tess, {"a": a, "b": b})
 
     def test_bfloat16_tangent(self, vectoradd_tess):
         a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)
@@ -163,6 +175,15 @@ class TestDtypes:
             result = apply_tesseract(vectoradd_tess, {"a": dual, "b": b})
             jvp = fwAD.unpack_dual(result["c"]).tangent
         assert torch.equal(jvp, torch.tensor([1.0, 0.0, 2.0]))
+
+    def test_bfloat16_nondifferentiable_input(self, vectoradd_tess):
+        """Also on a field whose dtype tesseract-torch does not read."""
+        a = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.bfloat16)
+        result = apply_tesseract(vectoradd_tess, {"a": a, "b": b})
+        assert torch.equal(result["c"], torch.tensor([5.0, 7.0, 9.0]))
+        result["c"].sum().backward()
+        assert torch.equal(a.grad, torch.ones(3))
 
     @pytest.mark.skipif(
         not torch.backends.mps.is_available(), reason="no MPS device available"
