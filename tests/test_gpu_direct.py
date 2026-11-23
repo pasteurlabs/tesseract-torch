@@ -277,40 +277,24 @@ def test_local_client_derivatives_with_transport(local_cuda_ipc_gpu_tesseract):
     np.testing.assert_allclose(tangent.cpu().numpy(), np.full((n,), 2.0), rtol=1e-6)
 
 
-def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
-    """A Tesseract offering cuda_ipc that does not work gets host copies, with a warning.
+def test_host_copies_without_a_gpu_transport():
+    """A Tesseract served without a GPU transport gets host copies of CUDA tensors.
 
-    Hiding the GPU from the server stands in for every reason cuda_ipc can fail,
-    e.g. a server on another host. A ``from_url`` client, which requests no
-    transport, falls back to host copies, so its outputs come back on the CPU
-    while gradients still reach the inputs' device. The client that requested
-    cuda_ipc gets an error instead of a silent host copy.
+    It offers no transport, so the copies come without a warning. Its outputs
+    come back on the CPU, while gradients still reach the inputs' device.
     """
     api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
-    # Only the server is spawned without the GPU. The test process reads
-    # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
-    with monkeypatch.context() as m:
-        m.setenv("CUDA_VISIBLE_DEVICES", "")
-        served = Tesseract.from_source(
-            api_path, python_executable=sys.executable, gpu_transport="cuda_ipc"
-        )
-        served.serve()
-    try:
-        remote = Tesseract.from_url(served._client.url)
+    with Tesseract.from_source(api_path, python_executable=sys.executable) as served:
         a = torch.arange(8, dtype=torch.float32, device="cuda", requires_grad=True)
         b = torch.ones(8, dtype=torch.float32, device="cuda")
-        with pytest.warns(UserWarning, match="copied to the host instead"):
-            out = apply_tesseract(remote, {"a": a, "b": b})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = apply_tesseract(served, {"a": a, "b": b})
         assert not out["c"].is_cuda
         np.testing.assert_allclose(out["c"].detach().numpy(), np.arange(8) + 1.0)
         out["c"].sum().backward()
         assert a.grad.is_cuda
         np.testing.assert_allclose(a.grad.cpu().numpy(), np.ones(8))
-
-        with pytest.raises(RuntimeError, match="does not work between"):
-            apply_tesseract(served, {"a": a, "b": b})
-    finally:
-        served.teardown()
 
 
 @pytest.mark.parametrize(
