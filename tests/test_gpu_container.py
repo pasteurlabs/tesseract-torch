@@ -4,10 +4,8 @@
 """GPU tests against a Tesseract served from a Docker container.
 
 The other GPU tests reach Tesseracts in-process and in a subprocess. Here the
-Tesseract runs in a container, so tensors cross a container boundary, and a
-container that cannot see the GPU stands in for a server that shares no GPU with
-the client, such as one on another host. The tests need Docker with the NVIDIA
-container runtime and are marked ``gpu``.
+Tesseract runs in a container, so tensors cross a container boundary. The tests
+need Docker with the NVIDIA container runtime and are marked ``gpu``.
 """
 
 from __future__ import annotations
@@ -70,36 +68,3 @@ def test_container_round_trip_stays_on_device(gpu_container_image, client):
         out["c"].sum().backward()
         assert a.grad.is_cuda
         np.testing.assert_allclose(a.grad.cpu().numpy(), np.full(64, 2.0))
-
-
-def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
-    """A container offering cuda_ipc that it cannot use leads to host copies.
-
-    The container cannot see the GPU, and computes with NumPy. A ``from_url``
-    client, which requests no transport, falls back to host copies with a
-    warning, so its outputs come back on the CPU while gradients still reach the
-    inputs' device. The client that requested cuda_ipc gets an error instead of
-    a silent host copy.
-    """
-    with Tesseract.from_image(
-        gpu_container_image,
-        gpus=["all"],
-        gpu_transport="cuda_ipc",
-        environment={
-            "TESSERACT_TORCH_TEST_ARRAY_MODULE": "numpy",
-            "CUDA_VISIBLE_DEVICES": "",
-        },
-    ) as served:
-        remote = Tesseract.from_url(served._client.url)
-        a = torch.arange(8, dtype=torch.float32, device="cuda", requires_grad=True)
-        b = torch.ones(8, dtype=torch.float32, device="cuda")
-        with pytest.warns(UserWarning, match="copied to the host instead"):
-            out = apply_tesseract(remote, {"a": a, "b": b})
-        assert not out["c"].is_cuda
-        np.testing.assert_allclose(out["c"].detach().numpy(), 2 * np.arange(8) + 1.0)
-        out["c"].sum().backward()
-        assert a.grad.is_cuda
-        np.testing.assert_allclose(a.grad.cpu().numpy(), np.full(8, 2.0))
-
-        with pytest.raises(RuntimeError, match="does not work between"):
-            apply_tesseract(served, {"a": a, "b": b})

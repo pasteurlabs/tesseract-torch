@@ -236,11 +236,13 @@ def test_unsupported_transport_is_rejected(vectoradd_api_path, monkeypatch):
         _resolve_gpu_transport(tess, has_cuda_tensors=True)
 
 
+@pytest.mark.gpu
 def test_with_gpu_transport_views_only_when_needed(vectoradd_api_path):
     """A call uses the Tesseract itself unless it needs another transport.
 
     Served with cuda_ipc, a call that needs ``"none"`` goes through a view
     requesting it, and every other combination through the Tesseract itself.
+    Only a Tesseract that can see a CUDA device serves cuda_ipc.
     """
     in_process = Tesseract.from_tesseract_api(vectoradd_api_path)
     assert _with_gpu_transport(in_process, "cuda_ipc") is in_process
